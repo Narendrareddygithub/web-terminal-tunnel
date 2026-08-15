@@ -1,0 +1,10 @@
+# Downloaded binaries / runtime state (recreated automatically on first run)
+.web-terminal/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs
+*.log
