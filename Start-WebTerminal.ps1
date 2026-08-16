@@ -199,7 +199,7 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host "`nInstalling 'qrcode' Python package (one-time)..."
     python -m pip install --quiet qrcode
 }
-$qrScript = "import sys, qrcode; q = qrcode.QRCode(border=1); q.add_data(sys.argv[1]); q.print_ascii(invert=True)"
+$qrScript = "import sys, qrcode; q = qrcode.QRCode(border=1); q.add_data(sys.argv[1]); m = q.get_matrix(); print('\n'.join(''.join('##' if c else '  ' for c in row) for row in m))"
 python -c $qrScript "$tunnelUrl"
 
 Write-Host "`nScan the QR code above, or open the URL on any device."

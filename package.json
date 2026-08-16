@@ -1,0 +1,40 @@
+{
+  "name": "wtt-web",
+  "version": "1.0.0",
+  "description": "One-command web terminal tunnel for Windows: spawns a real shell via ConPTY, streams it to a browser over WebSocket, exposed through a Cloudflare quick tunnel. Prints URL, 2-digit code and QR code.",
+  "license": "MIT",
+  "author": "Narendra Reddy",
+  "bin": {
+    "wtt-web": "bin/wtt.js"
+  },
+  "main": "bin/wtt.js",
+  "files": [
+    "bin",
+    "Start-WebTerminal.ps1",
+    "terminal_server.py",
+    "requirements.txt",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "win32"
+  ],
+  "keywords": [
+    "terminal",
+    "tunnel",
+    "conpty",
+    "websocket",
+    "cloudflare",
+    "remote",
+    "powershell",
+    "wsl",
+    "git-bash"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Narendrareddygithub/web-terminal-tunnel.git"
+  }
+}

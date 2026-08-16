@@ -25,10 +25,21 @@ binaries) + a Cloudflare quick tunnel for the public URL.
 
 ## Quick start
 
-**Requirements:** Windows 10/11, Python 3.9+ on `PATH`.
+**Requirements:** Windows 10/11, Python 3.9+ on `PATH`. Node.js 18+ only needed for the npm install method.
+
+**Option A — npm (recommended, works from any folder/shell):**
 
 ```powershell
-git clone https://github.com/<your-username>/web-terminal-tunnel.git
+npm i -g wtt-web
+wtt-web                # PowerShell by default
+wtt-web -Shell cmd     # or: pwsh, bash (Git Bash), wsl
+wtt-web -ShellChoice   # let the client pick any installed shell
+```
+
+**Option B — run from source:**
+
+```powershell
+git clone https://github.com/Narendrareddygithub/web-terminal-tunnel.git
 cd web-terminal-tunnel
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\Start-WebTerminal.ps1                # PowerShell by default
@@ -43,6 +54,7 @@ You'll see something like:
  Remote terminal is LIVE
  URL:  https://knee-sphere-silk-wayne.trycloudflare.com
  Code: 07
+ Shell: PowerShell
 ==========================================================
 ```
 
@@ -85,7 +97,8 @@ access code both die with it.
       `terminal_server.py`, `-Shell` / `-ShellChoice` in the launcher, `/shells`
       endpoint + in-browser picker)
 
-- [ ] Build a node package manager (npm) command for the whole software to run with one command recommended command 'wtt'.
+- [x] npm one-command launcher (done, published — `npm i -g wtt-web`, then run
+      `wtt-web` from any shell/folder; thin Node wrapper around the .ps1)
 
 Have an idea, found a bug, or want a feature? Please open an
 [Issue](../../issues) or start a [Discussion](../../discussions) — feedback from anyone

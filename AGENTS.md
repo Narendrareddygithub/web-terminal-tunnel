@@ -1,11 +1,12 @@
 # AGENTS.md
 
-Web terminal tunnel: spawns a real shell (PowerShell, cmd, Git Bash, WSL) via ConPTY, streams it to a browser over WebSocket, exposed via a Cloudflare quick tunnel. Windows-only.
+Web terminal tunnel: spawns a real shell (PowerShell, cmd, Git Bash, WSL) via ConPTY, streams it to a browser over WebSocket, exposed via a Cloudflare quick tunnel. Windows-only. Repo: `https://github.com/Narendrareddygithub/web-terminal-tunnel` (origin/main).
 
 ## Layout
 
 - `terminal_server.py` — FastAPI app (only backend). Serves an embedded HTML page (`INDEX_HTML` string, xterm.js from CDN) at `/`, a JSON shell list at `/shells`, and a WebSocket at `/ws`. Spawns shells via `pywinpty` (`PtyProcess`) using a whitelisted registry (`SHELLS`): powershell, pwsh, cmd, bash (Git Bash), wsl. Owner default via `TERMINAL_SHELL`; optional client picker via `TERMINAL_SHELL_CHOICE`.
 - `Start-WebTerminal.ps1` — one-command launcher / entrypoint. Everything else (deps, cloudflared, server, tunnel, QR code) is orchestrated here.
+- `package.json` + `bin/wtt.js` — the published npm wrapper (`wtt-web`, registry). Thin Node shim: spawns the .ps1 via `pwsh` (fallback `powershell.exe`, override `WTT_PSHOST`) with `-File`, forwards all args, `stdio: 'inherit'` so the child shares the console (Ctrl+C still hits the .ps1 `finally` teardown — the wrapper swallows its own SIGINT and exits with the child's code). No runtime deps. Package ships `.ps1` + `terminal_server.py` under `files`. Publish: `npm login` → `npm publish`; never commit `.npmrc` (gitignored).
 - `requirements.txt` — NOT the install source. The launcher pip-installs `fastapi`, `uvicorn[standard]`, `pywinpty`, and on demand `qrcode` into whatever Python is on PATH. Keep it in sync manually.
 
 ## Run / verify
@@ -16,6 +17,15 @@ No tests, no lint, no typecheck. Manual verification only:
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\Start-WebTerminal.ps1
 ```
+
+Or the published npm route (from any folder):
+
+```powershell
+npm i -g wtt-web
+wtt-web -Shell cmd -ShellChoice
+```
+
+Publishing to npm: `npm login` then `npm publish` (2FA/OTP or a granular bypass token required). Never commit `.npmrc` — gitignored. After a wrapper change: `npm pack` → `npm i -g ./wtt-web-1.0.0.tgz` → run + Ctrl+C teardown check before publishing.
 
 Expect output: tunnel URL (`https://<random>.trycloudflare.com`), 2-digit code, ASCII QR. Ctrl+C tears down server + tunnel.
 
@@ -50,4 +60,4 @@ python terminal_server.py   # binds 127.0.0.1:8765
 ## Roadmap (README Phase 2)
 
 - **Multi-shell support** (cmd, WSL, bash, etc.): DONE — registry + picker shipped (see Layout/Gotchas).
-- **npm one-command launcher** (`wtt`): wraps the whole flow in a single npm command.
+- **npm one-command launcher** (`wtt-web`): DONE — published; thin Node wrapper around the .ps1 (see Layout).
