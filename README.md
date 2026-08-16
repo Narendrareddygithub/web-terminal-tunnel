@@ -10,9 +10,13 @@ binaries) + a Cloudflare quick tunnel for the public URL.
 
 ## How it works
 
-- `terminal_server.py` — a small FastAPI app that spawns a real PowerShell process via
-  [`pywinpty`](https://pypi.org/project/pywinpty/) (ConPTY) and streams it to the browser
-  over a WebSocket, rendered client-side with [`xterm.js`](https://xtermjs.org/).
+- `terminal_server.py` — a small FastAPI app that spawns a real shell via
+  [`pywinpty`](https://pypi.org/project/pywinpty/) (ConPTY) and streams it to the
+  browser over a WebSocket, rendered client-side with
+  [`xterm.js`](https://xtermjs.org/). Supported shells: PowerShell, pwsh,
+  Command Prompt, Git Bash and WSL. The first client to enter the correct code
+  claims the session; later visitors only see who owns it and how much time is
+  left.
 - `Start-WebTerminal.ps1` — the one-command launcher. It installs Python dependencies on
   first run, downloads `cloudflared.exe`, starts the server, opens a Cloudflare quick
   tunnel, and prints a QR code + 2-digit access code.
@@ -27,7 +31,9 @@ binaries) + a Cloudflare quick tunnel for the public URL.
 git clone https://github.com/<your-username>/web-terminal-tunnel.git
 cd web-terminal-tunnel
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-.\Start-WebTerminal.ps1
+.\Start-WebTerminal.ps1                # PowerShell by default
+.\Start-WebTerminal.ps1 -Shell cmd     # or: pwsh, bash (Git Bash), wsl
+.\Start-WebTerminal.ps1 -ShellChoice   # let the client pick any installed shell
 ```
 
 You'll see something like:
@@ -40,9 +46,11 @@ You'll see something like:
 ==========================================================
 ```
 
-Open the URL on any device, enter the code, and you're in. On a phone, a small toolbar
-appears with Esc / Tab / Ctrl+C / Ctrl+D / Ctrl+Z / Ctrl+L / arrow keys, since mobile
-keyboards can't send those directly.
+Open the URL on any device, enter the code, and you're in. With `-ShellChoice`,
+a dropdown lets the client pick any installed shell (PowerShell, pwsh, cmd,
+Git Bash, WSL). On a phone, a small toolbar appears with Esc / Tab / Ctrl+C /
+Ctrl+D / Ctrl+Z / Ctrl+L / arrow keys, since mobile keyboards can't send those
+directly.
 
 Press **Ctrl+C** in the PowerShell window to shut everything down — the tunnel and the
 access code both die with it.
@@ -52,18 +60,32 @@ access code both die with it.
 - The tunnel URL is the real secret (a long, effectively unguessable random subdomain).
   Don't post it publicly.
 - The 2-digit code is a lightweight confirmation step, not the primary defense — 5 wrong
-  guesses from a client locks that client out for 5 minutes.
+  guesses from a client locks that client out for 5 minutes. The first client to enter the
+  code claims the session; later visitors only see who owns it and how much time is left.
+- Only whitelisted shells (PowerShell, pwsh, cmd, Git Bash, WSL) can be spawned — never an
+  arbitrary command. With `-ShellChoice`, the landing page lists which of those are
+  installed; that's already public information once someone has the URL.
 - Everything is ephemeral: closing the PowerShell window tears down the server and the
-  tunnel, and a fresh URL + code are generated on every run.
+  tunnel, and a fresh URL + code are generated on every run. Pass `-SessionMinutes N` to
+  cap the session at N minutes (server + tunnel auto-shut-down when it elapses). Every
+  code attempt is logged to `%USERPROFILE%\.web-terminal\connections.log`.
 - Treat an active session like you'd treat someone standing at your unlocked laptop.
   Don't leave it running unattended.
 
 ## Roadmap / ideas
 
-- [ ] Auto-stop timer (session ends automatically after N minutes of inactivity)
-- [ ] Connection logging (who connected, when, from what IP)
-- [ ] Option to run a different shell (cmd, WSL, pwsh)
+- [x] Auto-stop timer (done, tested — `-SessionMinutes N` hard limit)
+- [x] Connection logging (done, tested — who connected, when, from what IP)
+- [x] Option to run a different shell (done, tested — PowerShell, pwsh, cmd, Git Bash, WSL)
 - [ ] Persistent named tunnel option for longer-lived setups
+
+### Phase 2
+
+- [x] Multi-shell support (done, tested — whitelisted shell registry in
+      `terminal_server.py`, `-Shell` / `-ShellChoice` in the launcher, `/shells`
+      endpoint + in-browser picker)
+
+- [ ] Build a node package manager (npm) command for the whole software to run with one command recommended command 'wtt'.
 
 Have an idea, found a bug, or want a feature? Please open an
 [Issue](../../issues) or start a [Discussion](../../discussions) — feedback from anyone

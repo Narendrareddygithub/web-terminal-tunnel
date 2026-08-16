@@ -4,23 +4,80 @@
     xterm.js) and exposes it via a temporary Cloudflare quick tunnel, showing
     a QR code / URL to control this terminal remotely.
 
+.DESCRIPTION
+    The first client to enter the correct 2-digit code claims the session and
+    gets a live shell. Any later client is shown who owns the session and how
+    long is left, and is refused a terminal.
+
+.PARAMETER SessionMinutes
+    Optional. Hard time limit (in minutes) for the whole session. When it
+    elapses, the server (and tunnel) shut down. 0 (default) means no limit.
+
+.PARAMETER Shell
+    Optional. Default shell for the remote session: powershell, pwsh, cmd,
+    bash (Git Bash) or wsl. Default: powershell.
+
+.PARAMETER ShellChoice
+    Optional. When set, the client can pick any installed shell from a
+    dropdown in the browser instead of the -Shell default.
+
 .NOTES
     - Requires Python 3.9+ on PATH. Dependencies are installed automatically
       the first time (fastapi, uvicorn, pywinpty).
     - Does not touch your local session — the remote party gets their own
-      PowerShell process via ConPTY, your physical console is untouched.
-    - Protected with HTTP Basic Auth, random credentials every run.
+      shell process via ConPTY, your physical console is untouched.
+    - Protected with a 2-digit code; the first client to authenticate claims
+      the session.
     - Ctrl+C in this window tears down both the server and the tunnel.
 
 .USAGE
     Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-    .\Start-WebTerminal.ps1
+    .\Start-WebTerminal.ps1                        # PowerShell, no time limit
+    .\Start-WebTerminal.ps1 -SessionMinutes 30
+    .\Start-WebTerminal.ps1 -Shell cmd
+    .\Start-WebTerminal.ps1 -ShellChoice           # client picks shell
 #>
+
+param(
+    [int]$SessionMinutes = 0,
+    [ValidateSet("powershell", "pwsh", "cmd", "bash", "wsl")]
+    [string]$Shell = "powershell",
+    [switch]$ShellChoice
+)
 
 $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $workDir = Join-Path $env:USERPROFILE ".web-terminal"
 New-Item -ItemType Directory -Force -Path $workDir | Out-Null
+
+$shellNames = @{
+    powershell = "PowerShell"
+    pwsh       = "PowerShell 7 (pwsh)"
+    cmd        = "Command Prompt"
+    bash       = "Git Bash"
+    wsl        = "WSL (Linux)"
+}
+
+function Test-ShellAvailable([string]$id) {
+    switch ($id) {
+        "powershell" { return $true }
+        "cmd"        { return $true }
+        "pwsh"       { return $null -ne (Get-Command pwsh -ErrorAction SilentlyContinue) }
+        "bash" {
+            $p = Join-Path $env:ProgramFiles "Git\usr\bin\bash.exe"
+            $q = Join-Path ${env:ProgramFiles(x86)} "Git\usr\bin\bash.exe"
+            return (Test-Path $p) -or (Test-Path $q) -or ($null -ne (Get-Command bash -ErrorAction SilentlyContinue))
+        }
+        "wsl"        { return $null -ne (Get-Command wsl -ErrorAction SilentlyContinue) }
+    }
+    return $false
+}
+
+if (-not (Test-ShellAvailable $Shell)) {
+    Write-Host "Shell '$Shell' ($($shellNames[$Shell])) is not available on this machine." -ForegroundColor Red
+    Write-Host "Choose from: powershell, pwsh, cmd, bash, wsl." -ForegroundColor Yellow
+    exit 1
+}
 
 # ---------------------------------------------------------------------------
 # 1. Check Python is available
@@ -73,7 +130,9 @@ if (-not (Test-Path $serverScript)) {
 Write-Host "`nStarting web terminal server on 127.0.0.1:$port ..."
 $env:TERMINAL_PORT = $port
 $env:TERMINAL_CODE = $accessCode
-$env:TERMINAL_SHELL = "powershell.exe"
+$env:TERMINAL_SHELL = $Shell
+if ($ShellChoice) { $env:TERMINAL_SHELL_CHOICE = "1" }
+$env:TERMINAL_SESSION_MINUTES = $SessionMinutes
 
 $serverOutLog = Join-Path $workDir "server.out.log"
 $serverErrLog = Join-Path $workDir "server.err.log"
@@ -118,6 +177,13 @@ Write-Host "`n=========================================================="
 Write-Host " Remote terminal is LIVE"
 Write-Host " URL:  $tunnelUrl"
 Write-Host " Code: $accessCode"
+Write-Host " Shell: $($shellNames[$Shell])"
+if ($SessionMinutes -gt 0) {
+    Write-Host " Session ends in $SessionMinutes min"
+}
+if ($ShellChoice) {
+    Write-Host " Client may switch shell in the browser"
+}
 Write-Host "=========================================================="
 Write-Host " Open the URL, type the 2-digit code into the on-page prompt."
 Write-Host " (The URL itself is the real secret - keep it private. The"
