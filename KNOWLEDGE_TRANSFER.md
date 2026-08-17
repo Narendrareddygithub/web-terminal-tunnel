@@ -129,11 +129,12 @@ Three components:
 
 ### 3.4 Session time limit
 
-- `TERMINAL_SESSION_MINUTES` (launcher `-SessionMinutes`) arms a hard deadline.
-  A background `_monitor()` task polls every second; when the deadline elapses it
-  closes all active websockets, force-terminates tracked `PtyProcess`es, and sets
-  `server.should_exit`. The launcher's `Wait-Process` returns and the `finally`
-  block tears down the tunnel.
+- `TERMINAL_SESSION_MINUTES` (launcher `-SessionMinutes`) arms a hard deadline
+  **at server start** (in `lifespan`), so it counts down even if nobody ever
+  claims the hub. A background `_monitor()` task polls every second; when the
+  deadline elapses it closes all active websockets, force-terminates session
+  ConPTYs (`_terminate_session`), and sets `server.should_exit`. The launcher's
+  `Wait-Process` returns and the `finally` block tears down the tunnel.
 - `0` (default) = no deadline.
 
 ### 3.5 Connection logging
@@ -146,7 +147,7 @@ Three components:
 
 ### 3.6 npm launcher (`wtt-web`)
 
-- Published as **`wtt-web@1.0.0`** on the npm registry.
+- Published as **`wtt-web@1.1.0`** on the npm registry.
 - `package.json`: `bin: {"wtt-web": "bin/wtt.js"}`, `files` whitelist ships
   `bin/`, `Start-WebTerminal.ps1`, `terminal_server.py`, `requirements.txt`,
   `README.md`, `LICENSE`. `engines: node>=18`, `os: ["win32"]`. No runtime deps.
@@ -300,7 +301,7 @@ After any wrapper change, verify before publishing:
 
 ```powershell
 npm pack                       # produce the tarball
-npm i -g ./wtt-web-1.0.0.tgz   # install from the tarball
+npm i -g ./wtt-web-1.1.0.tgz   # install from the tarball
 wtt-web -Shell cmd             # run + Ctrl+C teardown check
 ```
 

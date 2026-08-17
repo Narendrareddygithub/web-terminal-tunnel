@@ -25,7 +25,7 @@ npm i -g wtt-web
 wtt-web -Shell cmd -ShellChoice -Sessions 3
 ```
 
-Publishing to npm: `npm login` then `npm publish` (2FA/OTP or a granular bypass token required). Never commit `.npmrc` — gitignored. After a wrapper change: `npm pack` → `npm i -g ./wtt-web-1.0.0.tgz` → run + Ctrl+C teardown check before publishing.
+Publishing to npm: `npm login` then `npm publish` (2FA/OTP or a granular bypass token required). Never commit `.npmrc` — gitignored. After a wrapper change: `npm pack` → `npm i -g ./wtt-web-1.1.0.tgz` → run + Ctrl+C teardown check before publishing.
 
 Expect output: tunnel URL (`https://<random>.trycloudflare.com`), 2-digit code, ASCII QR. Ctrl+C tears down server + tunnel.
 
@@ -48,7 +48,7 @@ python terminal_server.py   # binds 127.0.0.1:8765
 - **One-time hub claim, sessions persist:** the first correct code claim binds the whole hub to that client IP (`_owner`). The owner gets a dashboard listing `_sessions` and can create/close/attach. Every later client (foreign IP) is refused a terminal and gets a `{type:"claimed"}` status message — owner IP, connect time, countdown — rendered by the `showClaimed()` JS in `INDEX_HTML`. Sessions keep their ConPTY alive across client detaches (tmux-like): the reader thread survives ws close and re-attaches push output to the new ws. One attached ws per session; a second attach to a busy session gets `{type:"busy"}` and is closed.
 - **Client IP comes from headers, not the socket.** Behind cloudflared, `websocket.client.host` is always `127.0.0.1`. `_real_ip()` (`terminal_server.py`) reads `CF-Connecting-IP`, falls back to first `X-Forwarded-For` entry.
 - **Connection log:** every code attempt appends `<iso-ts> <ip> <accepted|rejected|watcher|reconnected> <shell-id>` to `TERMINAL_LOG` (default `%USERPROFILE%\.web-terminal\connections.log`). `-` in the shell column for rejected/watcher (no terminal spawned).
-- **Session duration:** `TERMINAL_SESSION_MINUTES` arms a hard deadline. A background `_monitor()` task closes active websockets, terminates session ConPTYs (`_terminate_session`), and sets `server.should_exit` — launcher's `Wait-Process` then returns and the `finally` block tears down the tunnel. No limit (0) = no deadline.
+- **Session duration:** `TERMINAL_SESSION_MINUTES` arms a hard deadline **at server start** (set in `lifespan`), so it counts down even if nobody ever claims the hub. A background `_monitor()` task closes active websockets, terminates session ConPTYs (`_terminate_session`), and sets `server.should_exit` — launcher's `Wait-Process` then returns and the `finally` block tears down the tunnel. No limit (0) = no deadline.
 - Brute-force guard in `throttle_guard` (`terminal_server.py`): 5 wrong guesses → client IP locked 300s, per-attempt delay grows to 10s. Don't weaken casually. Correct-code attempts bypass it and never increment the counter.
 - Access-code check is plaintext env var compared with `secrets.compare_digest` — keep it that way.
 - xterm.js + addon-fit load from jsDelivr CDN in the browser; the page breaks offline. No bundled vendored copy.
