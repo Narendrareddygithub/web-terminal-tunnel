@@ -16,14 +16,17 @@ Usage:
 Options:
   -Shell <id>        powershell | pwsh | cmd | bash (Git Bash) | wsl
                      (default: powershell)
-  -ShellChoice       let the client pick any installed shell from a dropdown
+  -ShellChoice       let the client pick the shell when creating sessions
+  -Sessions N        number of sessions pre-created on the dashboard (default: 1)
   -SessionMinutes N  hard time limit in minutes (0 = unlimited)
   --help, -h         show this help
 
-Starts a temporary, code-protected, web-accessible terminal: spawns a real
-shell via ConPTY, streams it to a browser over WebSocket, exposes it through
+Starts a temporary, code-protected, web-accessible terminal hub: spawns real
+shells via ConPTY, streams them to a browser over WebSocket, exposes it through
 a Cloudflare quick tunnel, and prints the URL, 2-digit code and a QR code.
-Press Ctrl+C to tear down the server and tunnel.`;
+The first client to enter the code claims the hub and gets a dashboard listing
+the active sessions. Sessions persist across disconnects. Press Ctrl+C to tear
+down the server and tunnel.`;
 
 if (args.some((a) => a === "--help" || a === "-h")) {
   process.stdout.write(USAGE + "\n");

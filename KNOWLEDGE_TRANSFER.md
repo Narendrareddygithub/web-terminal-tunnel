@@ -23,17 +23,24 @@ a **Cloudflare quick tunnel**; the FastAPI server itself binds `127.0.0.1` only.
 
 ```powershell
 npm i -g wtt-web
-wtt-web                # PowerShell by default
+wtt-web                # one PowerShell session by default
 wtt-web -Shell cmd     # or: pwsh, bash (Git Bash), wsl
-wtt-web -ShellChoice   # let the client pick any installed shell
+wtt-web -Sessions 3    # dashboard with 3 pre-created sessions
+wtt-web -ShellChoice   # let the client pick the shell when creating sessions
 ```
 
 **From source:**
 
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-.\Start-WebTerminal.ps1 [-Shell <id>] [-ShellChoice] [-SessionMinutes N]
+.\Start-WebTerminal.ps1 [-Shell <id>] [-ShellChoice] [-Sessions N] [-SessionMinutes N]
 ```
+
+The server is a **session hub**: the first client to enter the correct code
+claims the whole hub for their IP and gets a dashboard listing the active
+sessions, with controls to connect, create, and close them. Later visitors only
+see who owns it and how much time is left. Sessions persist across client
+disconnects — the shell keeps running until closed.
 
 ---
 
@@ -91,16 +98,25 @@ Three components:
 - Launcher flags: `-Shell <id>` sets the owner's default shell;
   `-ShellChoice` enables the in-browser dropdown.
 
-### 3.2 One-time claim + session ownership
+### 3.2 One-time claim + session hub
 
-- **First correct code claims the session** and binds it to that client IP.
-- Every later client — a foreign IP, or the same IP while a session is live — is
-  refused a terminal. They get a WebSocket close `4401` and a
-  `{type:"claimed"}` JSON message with owner IP, connect time, and remaining
-  time, rendered by `showClaimed()` in `INDEX_HTML` (a "session in use" panel
-  with a live countdown).
-- **Same-IP reconnect** is allowed, but only after the previous WebSocket has
-  dropped (`_session["active"]` is cleared in the handler `finally`).
+- **First correct code claims the hub** and binds it to that client IP
+  (`_owner`). The owner gets a dashboard listing `_sessions` and can
+  create/close/attach sessions.
+- Every later client (foreign IP) is refused a terminal. They get a WebSocket
+  close `4401` and a `{type:"claimed"}` JSON message with owner IP, connect
+  time, and remaining time, rendered by `showClaimed()` in `INDEX_HTML` (a
+  "session in use" panel with a live countdown).
+- **Sessions persist across client detaches** (tmux-like): the per-session
+  ConPTY + reader thread survive a WebSocket close. Re-attaching pushes output
+  to the new ws; output produced while detached is dropped (no scrollback).
+- **One attached ws per session.** A second attach to a busy session gets
+  `{type:"busy"}` and is closed.
+- **Dashboard WebSocket protocol** (`/ws` without `session`): server sends
+  `{type:"dashboard", owner, remaining, sessions:[{id,name,shell,status,created}]}`,
+  then accepts `{type:"create", shell}` / `{type:"close", id}` / `{type:"list"}`.
+  Terminal attach (`/ws?session=<id>`) is the pre-existing input/resize/raw
+  output protocol.
 
 ### 3.3 Brute-force guard
 
@@ -164,7 +180,7 @@ Three components:
 | `README.md` / `LICENSE` | user docs / license | ✅ |
 | `AGENTS.md` | agent/dev conventions | ❌ |
 | `KNOWLEDGE_TRANSFER.md` | this doc | ❌ |
-| `gitignore` | ignore rules (`.web-terminal/`, `*.log`, `.npmrc`) | ❌ |
+| `.gitignore` | ignore rules (`.web-terminal/`, `*.pyc`, `*.log`, `.npmrc`) | ❌ |
 
 **Note:** the in-repo `.gitignore` entry `.web-terminal/` does not cover the real
 runtime state dir (`%USERPROFILE%\.web-terminal\`). The launcher creates that dir
@@ -184,6 +200,7 @@ itself; it is intentionally outside the repo.
 | `TERMINAL_SHELL_CHOICE` | off | `1` = client can pick a shell in the browser |
 | `TERMINAL_WSL_DISTRO` | default distro | WSL distro name for the `wsl` shell |
 | `TERMINAL_SESSION_MINUTES` | `0` (unlimited) | Hard session limit in minutes |
+| `TERMINAL_SESSIONS` | `1` | Number of sessions pre-created at startup |
 | `TERMINAL_LOG` | `%USERPROFILE%\.web-terminal\connections.log` | Connection log path |
 
 ### Launcher flags (`Start-WebTerminal.ps1` / `wtt-web`)
@@ -191,7 +208,8 @@ itself; it is intentionally outside the repo.
 | Flag | Meaning |
 |---|---|
 | `-Shell <id>` | Owner default shell: `powershell\|pwsh\|cmd\|bash\|wsl` |
-| `-ShellChoice` | Show the client shell picker in the browser |
+| `-ShellChoice` | Show the client shell picker when creating sessions |
+| `-Sessions N` | Number of sessions pre-created at startup (default 1) |
 | `-SessionMinutes N` | Hard time limit (minutes), `0` = unlimited |
 | `--help` / `-h` | (npm shim) print usage |
 
@@ -227,6 +245,15 @@ itself; it is intentionally outside the repo.
 - **Do not weaken the brute-force guard** casually (5 wrong guesses → 300s
   lockout, growing delay). It's the only thing standing between the URL and a
   password-guessing attack on a 2-digit code.
+- **Sessions persist; output while detached is dropped.** A session's ConPTY and
+  reader thread outlive the client WebSocket; closing the tab does not kill the
+  shell. Re-attach pushes new output; anything produced while unattached is
+  lost (no scrollback buffering). Close a session from the dashboard to kill it.
+- **One attached ws per session.** The second attach gets `{type:"busy"}` and is
+  closed until the first drops. Dashboard ws is separate from terminal ws.
+- **Shell startup is slow under winpty on this machine** (~3s before cmd prints
+  its banner, longer for PowerShell profile load). Don't write tests or asserts
+  that expect output instantly after spawn.
 
 ---
 
@@ -245,16 +272,22 @@ python terminal_server.py   # binds 127.0.0.1:8765
 
 ### Full manual verification checklist (all confirmed on current build)
 
-1. First device claims session after entering the correct code.
-2. Second device sees the "claimed" screen (owner IP + connect time + countdown).
-3. Wrong code → growing delay / lockout + WebSocket close.
-4. Same-IP reconnect works after the previous WS drops.
-5. `connections.log` shows all four outcomes (`accepted|rejected|watcher|reconnected`).
-6. `-SessionMinutes N` shuts down server + tunnel when the deadline elapses.
-7. Tunnel E2E from a foreign device.
-8. Multi-shell: each installed shell spawns and answers input via ConPTY;
-   `-Shell <id>` sets the owner default; `-ShellChoice` shows the picker and the
-   chosen shell appears in the log; `/shells` returns the installed list.
+1. `wtt-web -Sessions 3` (or no args = 1) → dashboard lists the pre-created
+   sessions; owner connects to each and they answer input via ConPTY.
+2. "New session" button + shell dropdown → a session appears live, spawns on
+   first connect; `-ShellChoice` controls whether the dropdown is shown.
+3. Close a session → it disappears from the list and its ConPTY is killed.
+4. Disconnect mid-session → shell keeps running; reconnect re-attaches with
+   state intact (status shows `running`, then `attached`).
+5. Second device → claimed/watcher screen (owner IP + connect time + countdown),
+   no session list.
+6. Wrong code → growing delay / lockout + WebSocket close.
+7. Busy session → second attach refused (`{type:"busy"}`).
+8. `connections.log` shows all four outcomes (`accepted|rejected|watcher|reconnected`).
+9. `-SessionMinutes N` shuts down server + tunnel when the deadline elapses.
+10. Tunnel E2E from a foreign device.
+11. Multi-shell: each installed shell spawns and answers input via ConPTY;
+    `-Shell <id>` sets the owner default; `/shells` returns the installed list.
 
 ### Publishing `wtt-web` to npm
 
@@ -281,5 +314,6 @@ Then bump `version` in `package.json` and `npm publish`. Never commit `.npmrc`.
  URL:  https://<random>.trycloudflare.com
  Code: 07
  Shell: Command Prompt
+ Sessions: 3
 ==========================================================
 ```

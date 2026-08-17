@@ -1,30 +1,38 @@
 """
 terminal_server.py
-A minimal web-based terminal for Windows: spawns a real console via ConPTY
-(pywinpty) and streams it to a browser over a WebSocket using xterm.js.
+A session-hub web terminal for Windows: spawns one or more real consoles via
+ConPTY (pywinpty) and streams them to a browser over WebSocket using xterm.js.
 
-Access is gated by a short numeric code, entered via an in-page prompt.
-The first client to enter the correct code claims the session; every later
-client is refused a terminal and only shown who owns the session and how much
-time is left. Because a short code has a small keyspace, it is treated as a
-confirmation step (similar to GitHub/Microsoft "number matching" device
-approval) rather than the sole line of defense -- the real secret is the
-hard-to-guess Cloudflare quick-tunnel URL itself. Wrong guesses are slowed
-with a growing delay, and a client that fails repeatedly is locked out
-entirely for a cooldown period.
+Access is gated by a short numeric code. The first client to enter the correct
+code claims ownership of the whole hub for that client IP; every later client is
+refused a terminal and only shown who owns the session and how much time is
+left. The owner sees a dashboard listing the active sessions and can create,
+close and attach to them. Sessions persist across client disconnects (like
+tmux): the ConPTY keeps running until the session is closed, the server shuts
+down, or the time limit elapses.
+
+Because a short code has a small keyspace, it is treated as a confirmation
+step (similar to GitHub/Microsoft "number matching" device approval) rather
+than the sole line of defense -- the real secret is the hard-to-guess
+Cloudflare quick-tunnel URL itself. Wrong guesses are slowed with a growing
+delay, and a client that fails repeatedly is locked out entirely for a cooldown
+period.
 
 Configured via environment variables (set by the launcher script):
   TERMINAL_PORT           - port to bind on 127.0.0.1 (default 8765)
   TERMINAL_CODE           - access code (required)
   TERMINAL_SHELL          - default shell id: powershell|pwsh|cmd|bash|wsl
                             (default "powershell"; "powershell.exe" also accepted)
-  TERMINAL_SHELL_CHOICE   - "1" lets the client pick a shell in the browser (default off)
+  TERMINAL_SHELL_CHOICE   - "1" lets the client pick a shell when creating
+                            sessions in the browser (default off)
   TERMINAL_WSL_DISTRO     - optional WSL distro name for the wsl shell (default distro)
   TERMINAL_SESSION_MINUTES- hard session limit in minutes, 0 = no limit
+  TERMINAL_SESSIONS       - number of sessions pre-created at startup (default 1)
   TERMINAL_LOG            - connection log path (default ~/.web-terminal/connections.log)
 """
 
 import asyncio
+import itertools
 import json
 import os
 import secrets
@@ -47,15 +55,16 @@ except ImportError:
 PORT = int(os.environ.get("TERMINAL_PORT", "8765"))
 CODE = os.environ.get("TERMINAL_CODE")
 SESSION_SECONDS = int(os.environ.get("TERMINAL_SESSION_MINUTES", "0")) * 60
+PRE_CREATED_SESSIONS = max(1, int(os.environ.get("TERMINAL_SESSIONS", "1")))
 LOG_PATH = os.environ.get(
     "TERMINAL_LOG",
     os.path.join(os.path.expanduser("~"), ".web-terminal", "connections.log"),
 )
 
 # --- shell registry --------------------------------------------------------
-# Whitelisted shells only: the client can pick any installed shell from this
-# list, never an arbitrary command. `argv` is a callable returning the argv to
-# spawn; `env` is extra environment for that shell; `detect` checks presence.
+# Whitelisted shells only: the client can create a session from this list, never
+# an arbitrary command. `argv` is a callable returning the argv to spawn; `env`
+# is extra environment for that shell; `detect` checks presence.
 
 
 def _git_bash_path():
@@ -143,42 +152,41 @@ if not CODE:
 
 SERVER = None  # uvicorn.Server instance, set in __main__
 
-async def _monitor() -> None:
-    """Background task: end the session when its fixed duration elapses."""
-    while True:
-        await asyncio.sleep(1)
-        with _state_lock:
-            until = _session["until"]
-            ws_snapshot = list(_active_ws)
-            proc_snapshot = list(_procs)
-        if until is None or time.monotonic() < until:
-            continue
-        print("Session duration reached; shutting down.")
-        for w in ws_snapshot:
-            try:
-                await w.close()
-            except Exception:
-                pass
-        for p in proc_snapshot:
-            try:
-                p.terminate(force=True)
-            except Exception:
-                pass
-        if SERVER is not None:
-            SERVER.should_exit = True
-        return
+# --- hub state -------------------------------------------------------------
+# One owner per server lifetime: the first correct code claim binds the hub to a
+# client IP. The owner sees the dashboard and can create/close/attach sessions.
+# `_sessions` maps session id -> dict. A session's ConPTY is spawned lazily on
+# first attach and kept alive across disconnects.
+_owner = {"ip": None, "at_wall": 0.0, "until": None}
+_sessions = {}  # sid -> session dict
+_session_counter = itertools.count(1)
+_active_ws = set()  # accepted websockets (dashboard + terminal), for shutdown
+_state_lock = threading.Lock()
 
 
-@asynccontextmanager
-async def lifespan(_app):
-    task = asyncio.create_task(_monitor())
-    try:
-        yield
-    finally:
-        task.cancel()
+def _make_session(shell_id):
+    n = next(_session_counter)
+    return {
+        "id": f"s{n}",
+        "name": f"Session {n}",
+        "shell_id": shell_id,
+        "created_wall": time.time(),
+        "proc": None,        # PtyProcess, spawned on first attach
+        "ws": None,          # currently attached websocket (one per session)
+        "reader_stop": None, # threading.Event for the reader thread
+        "loop": None,        # asyncio loop the reader thread sends on
+    }
 
 
-app = FastAPI(lifespan=lifespan)
+_installed = available_shells()
+_DEFAULT_INSTALLED = (
+    DEFAULT_SHELL_ID
+    if DEFAULT_SHELL_ID in _installed
+    else next(iter(_installed), "powershell")
+)
+for _ in range(PRE_CREATED_SESSIONS):
+    sess = _make_session(_DEFAULT_INSTALLED)
+    _sessions[sess["id"]] = sess
 
 # --- brute-force protection -------------------------------------------------
 # Short codes have a small keyspace, so on top of a growing per-attempt
@@ -188,15 +196,34 @@ app = FastAPI(lifespan=lifespan)
 MAX_ATTEMPTS = 5
 LOCK_SECONDS = 300  # 5 minutes
 
-_state = {}  # client_ip -> {"count": int, "locked_until": float}
-_state_lock = threading.Lock()
+_throttle_state = {}  # client_ip -> {"count": int, "locked_until": float}
 
-# Single-session claim state: the first correct code claim binds the session to
-# one client IP. Other clients only see who owns the session and how long is
-# left (watcher screen); they never get a terminal.
-_session = {"ip": None, "at_wall": 0.0, "active": False, "until": None}
-_active_ws = set()  # websockets with an open PTY session
-_procs = set()      # live PtyProcess objects, for shutdown cleanup
+
+async def throttle_guard(client_ip: str) -> bool:
+    """Brute-force defense for wrong codes. Applies a growing per-attempt delay
+    and locks the client out after MAX_ATTEMPTS. Returns False if the client is
+    locked out (a fixed 2s sleep is consumed so lock state isn't revealed)."""
+    now = time.monotonic()
+
+    with _state_lock:
+        entry = _throttle_state.get(client_ip, {"count": 0, "locked_until": 0.0})
+        locked = entry["locked_until"] > now
+
+    if locked:
+        await asyncio.sleep(2)
+        return False
+
+    with _state_lock:
+        entry = _throttle_state.get(client_ip, {"count": 0, "locked_until": 0.0})
+        entry["count"] += 1
+        if entry["count"] >= MAX_ATTEMPTS:
+            entry["locked_until"] = now + LOCK_SECONDS
+            entry["count"] = 0
+        _throttle_state[client_ip] = entry
+        delay = min(entry["count"] * 2, 10)
+
+    await asyncio.sleep(delay)
+    return True
 
 
 def _real_ip(websocket: WebSocket) -> str:
@@ -224,32 +251,96 @@ def log_line(ip: str, result: str, shell: str = "-") -> None:
         pass
 
 
-async def throttle_guard(client_ip: str) -> bool:
-    """Brute-force defense for wrong codes. Applies a growing per-attempt delay
-    and locks the client out after MAX_ATTEMPTS. Returns False if the client is
-    locked out (a fixed 2s sleep is consumed so lock state isn't revealed)."""
+def _session_status(sess) -> str:
+    proc = sess["proc"]
+    if sess["ws"] is not None:
+        return "attached"
+    if proc is not None and proc.isalive():
+        return "running"
+    return "idle"
+
+
+def _session_info(sess) -> dict:
+    return {
+        "id": sess["id"],
+        "name": sess["name"],
+        "shell": sess["shell_id"],
+        "status": _session_status(sess),
+        "created": sess["created_wall"],
+    }
+
+
+def _dashboard_state() -> dict:
     now = time.monotonic()
-
     with _state_lock:
-        entry = _state.get(client_ip, {"count": 0, "locked_until": 0.0})
-        locked = entry["locked_until"] > now
+        owner_ip = _owner["ip"]
+        until = _owner["until"]
+        remaining = -1 if until is None else max(0, int(until - now))
+        sessions = [_session_info(s) for s in _sessions.values()]
+    return {
+        "type": "dashboard",
+        "owner": owner_ip,
+        "remaining": remaining,
+        "sessions": sessions,
+    }
 
-    if locked:
-        await asyncio.sleep(2)
-        return False
 
-    with _state_lock:
-        entry = _state.get(client_ip, {"count": 0, "locked_until": 0.0})
-        entry["count"] += 1
-        if entry["count"] >= MAX_ATTEMPTS:
-            entry["locked_until"] = now + LOCK_SECONDS
-            entry["count"] = 0
-        _state[client_ip] = entry
-        delay = min(entry["count"] * 2, 10)
+def _terminate_session(sess) -> None:
+    """Kill a session's ConPTY + reader thread + attached websocket. Sync-safe."""
+    stop = sess.get("reader_stop")
+    if stop is not None:
+        stop.set()
+    proc = sess.get("proc")
+    if proc is not None:
+        try:
+            proc.terminate(force=True)
+        except Exception:
+            pass
+    ws = sess.get("ws")
+    loop = sess.get("loop")
+    if ws is not None and loop is not None:
+        try:
+            fut = asyncio.run_coroutine_threadsafe(ws.close(), loop)
+            try:
+                fut.result(timeout=2)
+            except Exception:
+                pass
+        except Exception:
+            pass
 
-    await asyncio.sleep(delay)
-    return True
 
+async def _monitor() -> None:
+    """Background task: end the session when its fixed duration elapses."""
+    while True:
+        await asyncio.sleep(1)
+        with _state_lock:
+            until = _owner["until"]
+            sessions_snapshot = list(_sessions.values())
+        if until is None or time.monotonic() < until:
+            continue
+        print("Session duration reached; shutting down.")
+        for sess in sessions_snapshot:
+            _terminate_session(sess)
+        for w in list(_active_ws):
+            try:
+                await w.close()
+            except Exception:
+                pass
+        if SERVER is not None:
+            SERVER.should_exit = True
+        return
+
+
+@asynccontextmanager
+async def lifespan(_app):
+    task = asyncio.create_task(_monitor())
+    try:
+        yield
+    finally:
+        task.cancel()
+
+
+app = FastAPI(lifespan=lifespan)
 
 INDEX_HTML = """<!doctype html>
 <html>
@@ -262,8 +353,8 @@ INDEX_HTML = """<!doctype html>
 <style>
   * { box-sizing: border-box; }
   html, body { margin:0; padding:0; background:#1e1e1e; height:100%; overflow:hidden; }
-  #app { height:100vh; display:flex; flex-direction:column; }
-  #terminal { flex:1; min-height:0; padding:4px; display:none; }
+  #app { height:100vh; display:none; flex-direction:column; }
+  #terminal { flex:1; min-height:0; padding:4px; }
   #loaderr { color:#f55; font-family:monospace; padding:12px; white-space:pre-wrap; }
 
   #gate {
@@ -280,10 +371,6 @@ INDEX_HTML = """<!doctype html>
     font-family:Consolas, monospace; font-size:16px; padding:10px 24px; cursor:pointer;
     background:#2d6cdf; color:#fff; border:none; border-radius:6px;
   }
-  #gate select {
-    font-family:Consolas, monospace; font-size:15px; padding:8px 10px;
-    background:#111; color:#eee; border:1px solid #444; border-radius:6px;
-  }
   #gateerr { color:#f55; font-size:13px; min-height:16px; }
 
   /* Session-already-claimed screen */
@@ -294,6 +381,62 @@ INDEX_HTML = """<!doctype html>
   #claimed .claim-title { font-size:18px; color:#ff9d00; }
   #claimed .claim-info { font-size:14px; opacity:0.9; line-height:1.7; }
   #claimed .claim-count { font-size:30px; font-weight:bold; color:#eee; }
+
+  /* Dashboard */
+  #dash { display:none; height:100vh; flex-direction:column; }
+  #dash .dash-head {
+    display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+    padding:10px 14px; font-family:Consolas, monospace; color:#ddd;
+    border-bottom:1px solid #333;
+  }
+  #dash .dash-head .title { font-size:16px; color:#eee; }
+  #dash .dash-head .countdown { font-size:13px; opacity:0.8; margin-left:auto; }
+  #sesslist { flex:1; overflow-y:auto; padding:10px 14px; font-family:Consolas, monospace; }
+  .sessrow {
+    display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+    padding:10px 12px; margin-bottom:8px; background:#252526;
+    border:1px solid #333; border-radius:8px;
+  }
+  .sessrow .sess-name { font-size:15px; color:#eee; min-width:110px; }
+  .sessrow .sess-shell {
+    font-size:13px; color:#9cdcfe; background:#1e1e1e; padding:2px 8px; border-radius:4px;
+  }
+  .sessrow .sess-status { font-size:12px; padding:2px 8px; border-radius:4px; text-transform:capitalize; }
+  .sess-status.idle { color:#bbb; background:#333; }
+  .sess-status.running, .sess-status.attached { color:#4ec9b0; background:#1f3b33; }
+  .sessrow .sess-created { font-size:12px; color:#888; margin-left:auto; }
+  .sessrow button {
+    font-family:Consolas, monospace; font-size:13px; padding:6px 14px; cursor:pointer;
+    background:#2d6cdf; color:#fff; border:none; border-radius:6px;
+  }
+  .sessrow button.close { background:#3a3a3a; color:#f88; }
+  .sessrow button.close:hover { background:#4a4a4a; }
+  #dash .dash-new {
+    display:flex; gap:8px; align-items:center; flex-wrap:wrap;
+    padding:10px 14px; border-top:1px solid #333;
+    font-family:Consolas, monospace; color:#ddd;
+  }
+  #dash .dash-new select {
+    font-family:Consolas, monospace; font-size:14px; padding:8px 10px;
+    background:#111; color:#eee; border:1px solid #444; border-radius:6px;
+  }
+  #dash .dash-new button {
+    font-family:Consolas, monospace; font-size:14px; padding:8px 18px; cursor:pointer;
+    background:#2d6cdf; color:#fff; border:none; border-radius:6px;
+  }
+  #dash .dash-new .hint { font-size:12px; opacity:0.6; }
+
+  /* Terminal back bar */
+  #backbar {
+    display:none; align-items:center; gap:10px; padding:6px 10px;
+    background:#252526; border-bottom:1px solid #3a3a3a;
+    font-family:Consolas, monospace;
+  }
+  #backbar button {
+    font-family:Consolas, monospace; font-size:13px; padding:6px 14px;
+    background:#3a3a3a; color:#eee; border:1px solid #4a4a4a; border-radius:6px; cursor:pointer;
+  }
+  #backbar .sess-tag { color:#9cdcfe; font-size:13px; }
 
   /* Touch toolbar: keys a phone keyboard doesn't send */
   #toolbar {
@@ -331,10 +474,6 @@ INDEX_HTML = """<!doctype html>
   <div class="label">Enter access code</div>
   <input id="code" maxlength="2" inputmode="numeric" pattern="[0-9]*"
          autocomplete="off" autocapitalize="off" spellcheck="false" autofocus/>
-  <div id="shellrow" style="display:none; flex-direction:column; align-items:center; gap:6px;">
-    <div class="label">Shell</div>
-    <select id="shellsel"></select>
-  </div>
   <button id="go">Connect</button>
   <div id="gateerr"></div>
 </div>
@@ -349,7 +488,25 @@ INDEX_HTML = """<!doctype html>
   <div class="claim-count" id="claim-left">--:--</div>
 </div>
 
+<div id="dash">
+  <div class="dash-head">
+    <span class="title">Sessions</span>
+    <span class="countdown" id="dash-left"></span>
+  </div>
+  <div id="sesslist"></div>
+  <div class="dash-new">
+    <span>New session:</span>
+    <select id="newshell"></select>
+    <button id="addbtn">Add</button>
+    <span class="hint" id="addhint"></span>
+  </div>
+</div>
+
 <div id="app">
+  <div id="backbar">
+    <button id="backbtn">&larr; Sessions</button>
+    <span class="sess-tag" id="term-tag"></span>
+  </div>
   <div id="terminal"></div>
   <div id="toolbar">
     <button data-seq="\\u001b">Esc</button>
@@ -375,22 +532,30 @@ INDEX_HTML = """<!doctype html>
     throw new Error('xterm.js failed to load');
   }
 
+  let code = '';
+  let dashWs = null;
+  let termWs = null;
+  let term = null;
+  let fitAddon = null;
+  let countTimer = null;
+
   const codeInput = document.getElementById('code');
   codeInput.addEventListener('input', () => {
     codeInput.value = codeInput.value.replace(/[^0-9]/g, '').slice(0, 2);
   });
 
-  // Populate the shell picker when the owner allows choosing one.
+  // Populate the New-session shell dropdown.
   fetch('/shells').then(r => r.json()).then(data => {
-    if (!data.choice_allowed) return;
-    const sel = document.getElementById('shellsel');
+    const sel = document.getElementById('newshell');
     for (const s of data.available) {
       const o = document.createElement('option');
       o.value = s.id; o.textContent = s.name;
       if (s.id === data.default) o.selected = true;
       sel.appendChild(o);
     }
-    document.getElementById('shellrow').style.display = 'flex';
+    if (!data.choice_allowed) {
+      document.getElementById('addhint').textContent = '(shell fixed by owner)';
+    }
   }).catch(() => {});
 
   function fmtCountdown(sec) {
@@ -399,9 +564,9 @@ INDEX_HTML = """<!doctype html>
   }
 
   function showClaimed(obj) {
-    const gate = document.getElementById('gate');
+    document.getElementById('dash').style.display = 'none';
     document.getElementById('app').style.display = 'none';
-    gate.style.display = 'none';
+    document.getElementById('gate').style.display = 'none';
     document.getElementById('claim-ip').textContent = obj.ip || 'unknown';
     const d = new Date((obj.connected_at || 0) * 1000);
     document.getElementById('claim-at').textContent = isNaN(d.getTime()) ? 'n/a' : d.toLocaleString();
@@ -418,64 +583,151 @@ INDEX_HTML = """<!doctype html>
     }, 1000);
   }
 
-  function connect(code) {
-    const gate = document.getElementById('gate');
-    const gateerr = document.getElementById('gateerr');
-    const termDiv = document.getElementById('terminal');
-    const toolbar = document.getElementById('toolbar');
+  function renderSessions(st) {
+    const list = document.getElementById('sesslist');
+    list.innerHTML = '';
+    for (const s of st.sessions) {
+      const row = document.createElement('div');
+      row.className = 'sessrow';
 
-    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
-    const sel = document.getElementById('shellsel');
-    const shell = sel.value ? '&shell=' + encodeURIComponent(sel.value) : '';
-    const ws = new WebSocket(proto + '://' + window.location.host + '/ws?code=' + encodeURIComponent(code) + shell);
-    let opened = false;
+      const name = document.createElement('span');
+      name.className = 'sess-name'; name.textContent = s.name;
+      const sh = document.createElement('span');
+      sh.className = 'sess-shell'; sh.textContent = s.shell;
+      const stt = document.createElement('span');
+      stt.className = 'sess-status ' + s.status; stt.textContent = s.status;
+      const cr = document.createElement('span');
+      cr.className = 'sess-created';
+      cr.textContent = new Date(s.created * 1000).toLocaleTimeString();
 
-    ws.onopen = () => {
-      opened = true;
-      gate.style.display = 'none';
-      termDiv.style.display = 'block';
+      const conn = document.createElement('button');
+      conn.textContent = 'Connect';
+      conn.addEventListener('click', () => openTerminal(s.id, s.name));
 
-      const term = new Terminal({ cursorBlink: true, fontFamily: "Consolas, monospace", fontSize: 14 });
-      const fitAddon = new FitAddon.FitAddon();
-      term.loadAddon(fitAddon);
-      term.open(termDiv);
-      fitAddon.fit();
-      ws.send(JSON.stringify({type:'resize', cols: term.cols, rows: term.rows}));
-
-      ws.onmessage = (ev) => {
-        const d = ev.data;
-        if (typeof d === 'string' && d.charCodeAt(0) === 123) {
-          try {
-            const obj = JSON.parse(d);
-            if (obj.type === 'claimed') { showClaimed(obj); return; }
-          } catch (e) {}
+      const close = document.createElement('button');
+      close.className = 'close'; close.textContent = 'Close';
+      close.addEventListener('click', () => {
+        if (dashWs && dashWs.readyState === 1) {
+          dashWs.send(JSON.stringify({type:'close', id:s.id}));
         }
-        term.write(d);
-      };
-      ws.onclose = () => term.write('\\r\\n[connection closed]\\r\\n');
-      term.onData(data => ws.send(JSON.stringify({type:'input', data})));
-
-      window.addEventListener('resize', () => {
-        fitAddon.fit();
-        ws.send(JSON.stringify({type:'resize', cols: term.cols, rows: term.rows}));
       });
 
-      toolbar.querySelectorAll('button').forEach(btn => {
-        btn.addEventListener('click', () => {
-          ws.send(JSON.stringify({type:'input', data: btn.dataset.seq}));
-          term.focus();
-        });
-      });
-    };
+      row.appendChild(name); row.appendChild(sh); row.appendChild(stt);
+      row.appendChild(cr); row.appendChild(conn); row.appendChild(close);
+      list.appendChild(row);
+    }
 
-    ws.onerror = () => { if (!opened) gateerr.textContent = 'Wrong code or connection error. Try again.'; };
-    ws.onclose = () => { if (!opened) gateerr.textContent = 'Wrong code. Try again.'; };
+    const left = document.getElementById('dash-left');
+    if (st.remaining < 0) {
+      left.textContent = 'no time limit';
+    } else {
+      let rem = st.remaining;
+      const tick = () => { rem -= 1; left.textContent = rem <= 0 ? 'Session ended' : fmtCountdown(rem); };
+      left.textContent = fmtCountdown(rem);
+      clearInterval(countTimer);
+      countTimer = setInterval(tick, 1000);
+    }
   }
 
-  document.getElementById('go').addEventListener('click', () => connect(codeInput.value.trim()));
-  codeInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') connect(codeInput.value.trim());
+  function connect() {
+    code = codeInput.value.trim();
+    const gateerr = document.getElementById('gateerr');
+    if (!code) { gateerr.textContent = 'Enter the code.'; return; }
+    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    let opened = false;
+    dashWs = new WebSocket(proto + '://' + window.location.host + '/ws?code=' + encodeURIComponent(code));
+    dashWs.onopen = () => {
+      opened = true;
+      document.getElementById('gate').style.display = 'none';
+      document.getElementById('dash').style.display = 'flex';
+    };
+    dashWs.onmessage = (ev) => {
+      const d = ev.data;
+      if (typeof d !== 'string') return;
+      try {
+        const obj = JSON.parse(d);
+        if (obj.type === 'claimed') { showClaimed(obj); return; }
+        if (obj.type === 'dashboard') { renderSessions(obj); return; }
+      } catch (e) {}
+    };
+    dashWs.onclose = () => { if (!opened) gateerr.textContent = 'Wrong code. Try again.'; };
+    dashWs.onerror = () => { if (!opened) gateerr.textContent = 'Connection error. Try again.'; };
+  }
+
+  function openTerminal(sid, name) {
+    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const termDiv = document.getElementById('terminal');
+    document.getElementById('dash').style.display = 'none';
+    document.getElementById('term-tag').textContent = name + ' (' + sid + ')';
+    document.getElementById('backbar').style.display = 'flex';
+    termDiv.style.display = 'block';
+    termDiv.innerHTML = '';
+
+    term = new Terminal({ cursorBlink: true, fontFamily: "Consolas, monospace", fontSize: 14 });
+    fitAddon = new FitAddon.FitAddon();
+    term.loadAddon(fitAddon);
+    term.open(termDiv);
+    fitAddon.fit();
+
+    let opened = false;
+    termWs = new WebSocket(proto + '://' + window.location.host +
+      '/ws?code=' + encodeURIComponent(code) + '&session=' + encodeURIComponent(sid));
+    termWs.onopen = () => {
+      opened = true;
+      termWs.send(JSON.stringify({type:'resize', cols: term.cols, rows: term.rows}));
+    };
+    termWs.onmessage = (ev) => {
+      const d = ev.data;
+      if (typeof d === 'string' && d.charCodeAt(0) === 123) {
+        try {
+          const obj = JSON.parse(d);
+          if (obj.type === 'busy' || obj.type === 'error') {
+            term.write('\\r\\n[' + (obj.message || obj.type) + ']\\r\\n');
+            return;
+          }
+        } catch (e) {}
+      }
+      term.write(d);
+    };
+    termWs.onclose = () => { if (!opened) term.write('\\r\\n[connection closed]\\r\\n'); };
+    term.onData(data => { if (termWs) termWs.send(JSON.stringify({type:'input', data})); });
+
+    document.getElementById('toolbar').querySelectorAll('button').forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (termWs) termWs.send(JSON.stringify({type:'input', data: btn.dataset.seq}));
+        term.focus();
+      });
+    });
+    term.focus();
+  }
+
+  function backToDash() {
+    if (termWs) { try { termWs.close(); } catch (e) {} termWs = null; }
+    if (term) { term.dispose(); term = null; fitAddon = null; }
+    document.getElementById('terminal').style.display = 'none';
+    document.getElementById('backbar').style.display = 'none';
+    document.getElementById('dash').style.display = 'flex';
+    if (dashWs && dashWs.readyState === 1) {
+      dashWs.send(JSON.stringify({type:'list'}));
+    }
+  }
+
+  window.addEventListener('resize', () => {
+    if (term && fitAddon && termWs) {
+      fitAddon.fit();
+      termWs.send(JSON.stringify({type:'resize', cols: term.cols, rows: term.rows}));
+    }
   });
+
+  document.getElementById('backbtn').addEventListener('click', backToDash);
+  document.getElementById('addbtn').addEventListener('click', () => {
+    if (!dashWs || dashWs.readyState !== 1) return;
+    const sel = document.getElementById('newshell');
+    const shell = sel.value ? sel.value : '';
+    dashWs.send(JSON.stringify({type:'create', shell}));
+  });
+  document.getElementById('go').addEventListener('click', connect);
+  codeInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') connect(); });
 </script>
 </body>
 </html>
@@ -498,86 +750,157 @@ async def shells():
     }
 
 
-@app.websocket("/ws")
-async def ws_endpoint(websocket: WebSocket, code: str = ""):
-    client_ip = _real_ip(websocket)
-    ok = secrets.compare_digest(code or "", CODE)
-
-    if not ok:
-        await throttle_guard(client_ip)
-        log_line(client_ip, "rejected")
-        await websocket.close(code=4401)
-        return
-
-    now = time.monotonic()
+def _claim_owner(client_ip: str) -> None:
+    """Bind the hub to the first client that authenticates (idempotent)."""
     with _state_lock:
-        claimed_ip = _session["ip"]
-        claimed_active = _session["active"]
+        if _owner["ip"] is None:
+            _owner["ip"] = client_ip
+            _owner["at_wall"] = time.time()
+            _owner["until"] = time.monotonic() + SESSION_SECONDS if SESSION_SECONDS > 0 else None
 
-    if claimed_ip is not None and (claimed_active or client_ip != claimed_ip):
-        # Session already owned by someone else: show who owns it + time left.
+
+def _claimed_payload() -> dict:
+    with _state_lock:
+        owner_ip = _owner["ip"]
+        owner_at = _owner["at_wall"]
+        until = _owner["until"]
+    remaining = -1 if until is None else max(0, int(until - time.monotonic()))
+    return {"type": "claimed", "ip": owner_ip, "connected_at": owner_at, "remaining": remaining}
+
+
+async def _send_claimed(websocket: WebSocket, client_ip: str) -> None:
+    log_line(client_ip, "watcher")
+    await websocket.accept()
+    _active_ws.add(websocket)
+    try:
+        await websocket.send_text(json.dumps(_claimed_payload()))
+        await websocket.close(code=4401)
+    finally:
+        _active_ws.discard(websocket)
+
+
+def _reader(sess, loop) -> None:
+    """Push a session's ConPTY output to whichever websocket is attached.
+    Lives for the session's lifetime: keeps running across ws detach/attach."""
+    proc = sess["proc"]
+    stop = sess["reader_stop"]
+    while not stop.is_set() and proc.isalive():
+        try:
+            data = proc.read(4096)
+        except Exception:
+            break
+        if not data:
+            continue
         with _state_lock:
-            owner = _session["ip"]
-            owner_at = _session["at_wall"]
-            until = _session["until"]
-        remaining = -1 if until is None else max(0, int(until - now))
-        log_line(client_ip, "watcher")
+            ws = sess["ws"]
+        if ws is None:
+            continue  # detached: output is dropped
+        fut = asyncio.run_coroutine_threadsafe(ws.send_text(data), loop)
+        try:
+            fut.result()
+        except Exception:
+            pass
+    stop.set()
+
+
+async def _handle_dashboard(websocket: WebSocket, client_ip: str) -> None:
+    log_line(client_ip, "accepted")
+    await websocket.accept()
+    _active_ws.add(websocket)
+    try:
+        await websocket.send_text(json.dumps(_dashboard_state()))
+        while True:
+            msg = await websocket.receive_text()
+            try:
+                obj = json.loads(msg)
+            except json.JSONDecodeError:
+                continue
+            t = obj.get("type")
+            if t == "create":
+                shell = (obj.get("shell") or "").strip().lower()
+                avail = available_shells()
+                if shell not in avail:
+                    shell = _DEFAULT_INSTALLED
+                with _state_lock:
+                    sess = _make_session(shell)
+                    _sessions[sess["id"]] = sess
+                await websocket.send_text(json.dumps(_dashboard_state()))
+            elif t == "close":
+                sid = obj.get("id")
+                with _state_lock:
+                    sess = _sessions.pop(sid, None)
+                if sess is not None:
+                    _terminate_session(sess)
+                await websocket.send_text(json.dumps(_dashboard_state()))
+            elif t == "list":
+                await websocket.send_text(json.dumps(_dashboard_state()))
+    except WebSocketDisconnect:
+        pass
+    finally:
+        _active_ws.discard(websocket)
+
+
+async def _handle_attach(websocket: WebSocket, session_id: str, client_ip: str) -> None:
+    with _state_lock:
+        sess = _sessions.get(session_id)
+
+    if sess is None:
         await websocket.accept()
-        await websocket.send_text(json.dumps({
-            "type": "claimed",
-            "ip": owner,
-            "connected_at": owner_at,
-            "remaining": remaining,
-        }))
-        await websocket.close(code=4401)
+        _active_ws.add(websocket)
+        try:
+            await websocket.send_text(json.dumps({"type": "error", "message": "no such session"}))
+            await websocket.close(code=4404)
+        finally:
+            _active_ws.discard(websocket)
         return
 
     with _state_lock:
-        was_new = _session["ip"] is None
-        if was_new:
-            _session["at_wall"] = time.time()
-            _session["until"] = now + SESSION_SECONDS if SESSION_SECONDS > 0 else None
-        _session["ip"] = client_ip
-        _session["active"] = True
+        attached = sess["ws"] is not None
+    if attached:
+        log_line(client_ip, "rejected")
+        await websocket.accept()
         _active_ws.add(websocket)
-
-    avail = available_shells()
-    shell_id = DEFAULT_SHELL_ID if DEFAULT_SHELL_ID in avail else next(iter(avail), "powershell")
-    if SHELL_CHOICE:
-        requested = (websocket.query_params.get("shell") or "").strip().lower()
-        if requested in avail:
-            shell_id = requested
-    log_line(client_ip, "accepted" if was_new else "reconnected", shell_id)
+        try:
+            await websocket.send_text(json.dumps({"type": "busy", "message": "session in use"}))
+            await websocket.close(code=4401)
+        finally:
+            _active_ws.discard(websocket)
+        return
 
     await websocket.accept()
-    spec = SHELLS[shell_id]
-    env = dict(os.environ)
-    env.update(spec.get("env", {}))
-    proc = PtyProcess.spawn(spec["argv"](), dimensions=(30, 120), env=env)
-    with _state_lock:
-        _procs.add(proc)
-
-    loop = asyncio.get_event_loop()
-    stop = threading.Event()
-
-    def reader():
-        while not stop.is_set() and proc.isalive():
-            try:
-                data = proc.read(4096)
-            except EOFError:
-                break
-            if data:
-                fut = asyncio.run_coroutine_threadsafe(websocket.send_text(data), loop)
-                try:
-                    fut.result()
-                except Exception:
-                    break
-        stop.set()
-
-    t = threading.Thread(target=reader, daemon=True)
-    t.start()
-
+    _active_ws.add(websocket)
     try:
+        with _state_lock:
+            sess["ws"] = websocket
+            proc = sess["proc"]
+            reader = sess.get("reader")
+            reattach = proc is not None and proc.isalive()
+            reader_alive = reader is not None and reader.is_alive()
+
+        if not reattach:
+            spec = SHELLS[sess["shell_id"]]
+            env = dict(os.environ)
+            env.update(spec.get("env", {}))
+            proc = PtyProcess.spawn(spec["argv"](), dimensions=(30, 120), env=env)
+            loop = asyncio.get_event_loop()
+            sess["proc"] = proc
+            sess["loop"] = loop
+            sess["reader_stop"] = threading.Event()
+            t = threading.Thread(target=_reader, args=(sess, loop), daemon=True)
+            sess["reader"] = t
+            t.start()
+        elif not reader_alive:
+            # Proc survived a client detach but its reader thread died:
+            # restart the reader so output flows to the new attach.
+            loop = asyncio.get_event_loop()
+            sess["loop"] = loop
+            sess["reader_stop"] = threading.Event()
+            t = threading.Thread(target=_reader, args=(sess, loop), daemon=True)
+            sess["reader"] = t
+            t.start()
+
+        log_line(client_ip, "accepted" if not reattach else "reconnected", sess["shell_id"])
+
         while True:
             msg = await websocket.receive_text()
             try:
@@ -585,30 +908,52 @@ async def ws_endpoint(websocket: WebSocket, code: str = ""):
             except json.JSONDecodeError:
                 continue
             if obj.get("type") == "input":
-                proc.write(obj.get("data", ""))
-            elif obj.get("type") == "resize":
-                cols = int(obj.get("cols", 80))
-                rows = int(obj.get("rows", 24))
                 try:
-                    proc.setwinsize(rows, cols)
+                    proc.write(obj.get("data", ""))
+                except Exception:
+                    break
+            elif obj.get("type") == "resize":
+                try:
+                    proc.setwinsize(int(obj.get("rows", 24)), int(obj.get("cols", 80)))
                 except Exception:
                     pass
     except WebSocketDisconnect:
         pass
     finally:
-        stop.set()
-        try:
-            proc.terminate(force=True)
-        except Exception:
-            pass
         with _state_lock:
-            _procs.discard(proc)
-            _active_ws.discard(websocket)
-            _session["active"] = False
+            if sess["ws"] is websocket:
+                sess["ws"] = None
+        _active_ws.discard(websocket)
+
+
+@app.websocket("/ws")
+async def ws_endpoint(websocket: WebSocket):
+    client_ip = _real_ip(websocket)
+    code = websocket.query_params.get("code", "")
+    ok = secrets.compare_digest(code, CODE)
+
+    if not ok:
+        await throttle_guard(client_ip)
+        log_line(client_ip, "rejected")
+        await websocket.close(code=4401)
+        return
+
+    _claim_owner(client_ip)
+    with _state_lock:
+        owner_ip = _owner["ip"]
+    if owner_ip != client_ip:
+        await _send_claimed(websocket, client_ip)
+        return
+
+    session_id = websocket.query_params.get("session", "")
+    if session_id:
+        await _handle_attach(websocket, session_id, client_ip)
+    else:
+        await _handle_dashboard(websocket, client_ip)
 
 
 if __name__ == "__main__":
-    print(f"Terminal server listening on 127.0.0.1:{PORT}")
+    print(f"Terminal hub listening on 127.0.0.1:{PORT} ({PRE_CREATED_SESSIONS} session(s) pre-created)")
     config = uvicorn.Config(app, host="127.0.0.1", port=PORT, log_level="warning")
     server = uvicorn.Server(config)
     SERVER = server

@@ -5,45 +5,57 @@
     a QR code / URL to control this terminal remotely.
 
 .DESCRIPTION
-    The first client to enter the correct 2-digit code claims the session and
-    gets a live shell. Any later client is shown who owns the session and how
-    long is left, and is refused a terminal.
+    The first client to enter the correct 2-digit code claims the whole hub for
+    their IP and gets a dashboard listing the active sessions, with the ability
+    to create, close and attach to them. Any later client is shown who owns the
+    session and how long is left, and is refused a terminal.
 
 .PARAMETER SessionMinutes
     Optional. Hard time limit (in minutes) for the whole session. When it
     elapses, the server (and tunnel) shut down. 0 (default) means no limit.
 
+.PARAMETER Sessions
+    Optional. Number of sessions pre-created at startup (default 1). The
+    client sees them all on a dashboard and can create more.
+
 .PARAMETER Shell
-    Optional. Default shell for the remote session: powershell, pwsh, cmd,
+    Optional. Default shell for new sessions: powershell, pwsh, cmd,
     bash (Git Bash) or wsl. Default: powershell.
 
 .PARAMETER ShellChoice
-    Optional. When set, the client can pick any installed shell from a
-    dropdown in the browser instead of the -Shell default.
+    Optional. When set, the client can pick any installed shell when creating
+    a session from the dashboard instead of the -Shell default.
 
 .NOTES
     - Requires Python 3.9+ on PATH. Dependencies are installed automatically
       the first time (fastapi, uvicorn, pywinpty).
     - Does not touch your local session — the remote party gets their own
-      shell process via ConPTY, your physical console is untouched.
+      shell processes via ConPTY, your physical console is untouched.
     - Protected with a 2-digit code; the first client to authenticate claims
-      the session.
+      the whole hub. Sessions persist across client disconnects until closed.
     - Ctrl+C in this window tears down both the server and the tunnel.
 
 .USAGE
     Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-    .\Start-WebTerminal.ps1                        # PowerShell, no time limit
+    .\Start-WebTerminal.ps1                        # one session, no time limit
+    .\Start-WebTerminal.ps1 -Sessions 3            # dashboard with 3 sessions
     .\Start-WebTerminal.ps1 -SessionMinutes 30
     .\Start-WebTerminal.ps1 -Shell cmd
-    .\Start-WebTerminal.ps1 -ShellChoice           # client picks shell
+    .\Start-WebTerminal.ps1 -ShellChoice           # client picks shell for new sessions
 #>
 
 param(
     [int]$SessionMinutes = 0,
+    [int]$Sessions = 1,
     [ValidateSet("powershell", "pwsh", "cmd", "bash", "wsl")]
     [string]$Shell = "powershell",
     [switch]$ShellChoice
 )
+
+if ($Sessions -lt 1) {
+    Write-Host "Sessions must be at least 1." -ForegroundColor Red
+    exit 1
+}
 
 $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -131,6 +143,7 @@ Write-Host "`nStarting web terminal server on 127.0.0.1:$port ..."
 $env:TERMINAL_PORT = $port
 $env:TERMINAL_CODE = $accessCode
 $env:TERMINAL_SHELL = $Shell
+$env:TERMINAL_SESSIONS = $Sessions
 if ($ShellChoice) { $env:TERMINAL_SHELL_CHOICE = "1" }
 $env:TERMINAL_SESSION_MINUTES = $SessionMinutes
 
@@ -178,6 +191,7 @@ Write-Host " Remote terminal is LIVE"
 Write-Host " URL:  $tunnelUrl"
 Write-Host " Code: $accessCode"
 Write-Host " Shell: $($shellNames[$Shell])"
+Write-Host " Sessions: $Sessions"
 if ($SessionMinutes -gt 0) {
     Write-Host " Session ends in $SessionMinutes min"
 }
