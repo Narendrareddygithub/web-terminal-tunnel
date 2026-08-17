@@ -318,7 +318,7 @@ async def _monitor() -> None:
             sessions_snapshot = list(_sessions.values())
         if until is None or time.monotonic() < until:
             continue
-        print("Session duration reached; shutting down.")
+        print("Session duration reached; shutting down.", flush=True)
         for sess in sessions_snapshot:
             _terminate_session(sess)
         for w in list(_active_ws):
@@ -333,6 +333,10 @@ async def _monitor() -> None:
 
 @asynccontextmanager
 async def lifespan(_app):
+    # Arm the hard deadline at server start so -SessionMinutes shuts the whole
+    # thing down even if no client ever claims the hub.
+    with _state_lock:
+        _owner["until"] = time.monotonic() + SESSION_SECONDS if SESSION_SECONDS > 0 else None
     task = asyncio.create_task(_monitor())
     try:
         yield
@@ -756,7 +760,6 @@ def _claim_owner(client_ip: str) -> None:
         if _owner["ip"] is None:
             _owner["ip"] = client_ip
             _owner["at_wall"] = time.time()
-            _owner["until"] = time.monotonic() + SESSION_SECONDS if SESSION_SECONDS > 0 else None
 
 
 def _claimed_payload() -> dict:
@@ -953,7 +956,7 @@ async def ws_endpoint(websocket: WebSocket):
 
 
 if __name__ == "__main__":
-    print(f"Terminal hub listening on 127.0.0.1:{PORT} ({PRE_CREATED_SESSIONS} session(s) pre-created)")
+    print(f"Terminal hub listening on 127.0.0.1:{PORT} ({PRE_CREATED_SESSIONS} session(s) pre-created)", flush=True)
     config = uvicorn.Config(app, host="127.0.0.1", port=PORT, log_level="warning")
     server = uvicorn.Server(config)
     SERVER = server
