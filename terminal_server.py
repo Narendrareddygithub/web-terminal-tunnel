@@ -29,6 +29,10 @@ Configured via environment variables (set by the launcher script):
   TERMINAL_SESSION_MINUTES- hard session limit in minutes, 0 = no limit
   TERMINAL_SESSIONS       - number of sessions pre-created at startup (default 1)
   TERMINAL_LOG            - connection log path (default ~/.web-terminal/connections.log)
+  TERMINAL_AGENTS         - "1" enables AI-agent harness detection (default on; "0" off)
+  TERMINAL_AGENT_CWD      - default working dir for agent sessions (default ~)
+  TERMINAL_AGENT_CONFIG   - optional path to custom agents JSON (default
+                            ~/.web-terminal/agents.json)
 """
 
 import asyncio
@@ -46,6 +50,8 @@ from datetime import datetime
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 import uvicorn
+
+import agents
 
 try:
     from winpty import PtyProcess
@@ -164,12 +170,13 @@ _active_ws = set()  # accepted websockets (dashboard + terminal), for shutdown
 _state_lock = threading.Lock()
 
 
-def _make_session(shell_id):
+def _make_session(shell_id, cwd=None):
     n = next(_session_counter)
     return {
         "id": f"s{n}",
         "name": f"Session {n}",
         "shell_id": shell_id,
+        "cwd": cwd,
         "created_wall": time.time(),
         "proc": None,        # PtyProcess, spawned on first attach
         "ws": None,          # currently attached websocket (one per session)
@@ -426,6 +433,47 @@ INDEX_HTML = """<!doctype html>
   .stab.sub + .stab.sub { border-left:1px solid #333; }
   .stab.sub:hover { background:#2d2d30; }
   .stab.sub.on { background:#2d6cdf; color:#fff; }
+  /* agent tab row (distinct purple accent) */
+  #agenttabs {
+    display:none; flex-wrap:wrap; align-items:center; gap:2px;
+    background:#2d2d30; padding:4px 14px 0; font-family:Consolas, monospace;
+  }
+  #agenttabs.has { display:flex; }
+  #agenttabs .stab.on { color:#e9d5ff; }
+  #agenttabs .stab.on::before { background:#8b5cf6; }
+  .tag { font-size:10px; padding:1px 6px; border-radius:999px; border:1px solid #555; color:#aaa; margin-left:6px; }
+  .tag.eol { color:#ff9d00; border-color:#7a4f00; }
+  .tag.custom { color:#c4b5fd; border-color:#5b3a9e; }
+  /* landing-page detected-harnesses card */
+  #detect {
+    display:none; max-width:480px; width:100%; background:#252526;
+    border:1px solid #333; border-radius:10px; padding:14px 16px;
+    font-family:Consolas, monospace;
+  }
+  #detect.on { display:block; }
+  #detect h3 { margin:0 0 8px; font-size:13px; color:#9cdcfe; font-weight:normal; }
+  #detect ul { list-style:none; margin:0; padding:0; }
+  #detect li { font-size:13px; color:#ddd; padding:3px 0; display:flex; align-items:center; flex-wrap:wrap; gap:6px; }
+  #detect .dver { color:#888; font-size:12px; }
+  #detect .dnl { color:#888; font-size:11px; margin-left:auto; }
+  /* agent working-directory input in the create row */
+  #newcwd {
+    font-family:Consolas, monospace; font-size:13px; padding:8px 10px;
+    background:#111; color:#eee; border:1px solid #444; border-radius:6px;
+    display:none; min-width:220px;
+  }
+  #newcwd.on { display:inline-block; }
+  #dashmsg { font-size:12px; color:#ff9d00; }
+  .srow .sagent {
+    font-size:10px; padding:1px 6px; border-radius:999px;
+    background:#2a1d4d; color:#c4b5fd; border:1px solid #5b3a9e;
+  }
+  #rescanbtn {
+    font-family:Consolas, monospace; font-size:12px; padding:4px 10px;
+    background:#3a3a3a; color:#ddd; border:1px solid #4a4a4a; border-radius:6px; cursor:pointer;
+  }
+  #rescanbtn:hover { background:#4a4a4a; }
+  .secbanner { font-size:12px; color:#ff9d00; padding:6px 14px; border-bottom:1px solid #333; font-family:Consolas, monospace; }
   #sesslist { flex:1; overflow-y:auto; padding:10px 14px; font-family:Consolas, monospace; }
   .srow {
     display:flex; align-items:center; gap:10px; flex-wrap:wrap;
@@ -516,6 +564,10 @@ INDEX_HTML = """<!doctype html>
          autocomplete="off" autocapitalize="off" spellcheck="false" autofocus/>
   <button id="go">Connect</button>
   <div id="gateerr"></div>
+  <div id="detect">
+    <h3>AI harnesses detected on this machine</h3>
+    <ul id="detectlist"></ul>
+  </div>
 </div>
 
 <div id="claimed">
@@ -532,16 +584,21 @@ INDEX_HTML = """<!doctype html>
   <div class="dash-head">
     <span class="title">Sessions</span>
     <span id="active-count"></span>
+    <button id="rescanbtn" title="Re-detect installed AI harnesses">&#8635; Rescan agents</button>
     <span class="countdown" id="dash-left"></span>
   </div>
+  <div class="secbanner" id="secbanner">Agent sessions run with your local machine credentials and API keys.</div>
   <div id="shelltabs"></div>
+  <div id="agenttabs"></div>
   <div id="subtabs"></div>
   <div id="sesslist"></div>
   <div class="dash-new">
     <span>New session:</span>
     <select id="newshell"></select>
+    <input id="newcwd" placeholder="working directory (agents)" spellcheck="false"/>
     <button id="addbtn">Add</button>
     <span class="hint" id="addhint"></span>
+    <span id="dashmsg"></span>
   </div>
 </div>
 
@@ -585,28 +642,62 @@ INDEX_HTML = """<!doctype html>
   let dashState = null; // last dashboard payload
   let activeShell = 'all';
   let activeStatus = 'all';
+  let agentMap = {};    // agent id -> {name, version, tags, launchable, notes}
+  let agentIds = [];    // ordered agent ids (launchable first)
+  let agentDefaultCwd = '~';
+  let activeAgent = 'all';
 
   const codeInput = document.getElementById('code');
   codeInput.addEventListener('input', () => {
     codeInput.value = codeInput.value.replace(/[^0-9]/g, '').slice(0, 2);
   });
 
-  // Populate the New-session shell dropdown + shell tab map.
-  fetch('/shells').then(r => r.json()).then(data => {
-    shellMap = {};
-    const sel = document.getElementById('newshell');
-    for (const s of data.available) {
-      shellMap[s.id] = s.name;
-      const o = document.createElement('option');
-      o.value = s.id; o.textContent = s.name;
-      if (s.id === data.default) o.selected = true;
-      sel.appendChild(o);
-    }
-    if (!data.choice_allowed) {
-      document.getElementById('addhint').textContent = '(shell fixed by owner)';
-    }
-    if (dashState) renderSessions(dashState);
-  }).catch(() => {});
+  // Populate the New-session dropdown (shells + agents), the shell tab map,
+  // the landing-page detected card and the agent tab row.
+  function loadShells() {
+    fetch('/shells').then(r => r.json()).then(data => {
+      shellMap = {};
+      agentMap = {};
+      agentIds = [];
+      agentDefaultCwd = data.agent_default_cwd || '~';
+      const sel = document.getElementById('newshell');
+      sel.innerHTML = '';
+      let og = document.createElement('optgroup');
+      og.label = 'Shells';
+      for (const s of data.available) {
+        shellMap[s.id] = s.name;
+        const o = document.createElement('option');
+        o.value = s.id; o.textContent = s.name;
+        if (s.id === data.default) o.selected = true;
+        og.appendChild(o);
+      }
+      sel.appendChild(og);
+      const ag = data.agents || [];
+      if (ag.length) {
+        og = document.createElement('optgroup');
+        og.label = 'AI Agents';
+        for (const a of ag) {
+          agentMap[a.id] = a;
+          agentIds.push(a.id);
+          const o = document.createElement('option');
+          o.value = a.id;
+          o.textContent = a.name + (a.version ? ' \u00b7 v' + a.version : '');
+          og.appendChild(o);
+        }
+        sel.appendChild(og);
+      }
+      if (!data.choice_allowed) {
+        document.getElementById('addhint').textContent = '(shell fixed by owner)';
+      }
+      renderDetectCard(ag);
+      renderAgentTabs();
+      if (dashState) renderSessions(dashState);
+    }).catch(() => {});
+  }
+  loadShells();
+  // Refresh once more a few seconds later: version probes run in a background
+  // thread server-side, so late results just landed.
+  setTimeout(loadShells, 4000);
 
   function decodeSeq(s) {
     return s.replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
@@ -637,9 +728,60 @@ INDEX_HTML = """<!doctype html>
     }, 1000);
   }
 
+  function renderDetectCard(agents) {
+    const card = document.getElementById('detect');
+    const ul = document.getElementById('detectlist');
+    ul.innerHTML = '';
+    const ordered = agents.slice().sort((a, b) => (a.launchable === b.launchable ? 0 : a.launchable ? -1 : 1));
+    for (const a of ordered) {
+      const li = document.createElement('li');
+      li.textContent = a.name;
+      const ver = document.createElement('span');
+      ver.className = 'dver';
+      ver.textContent = a.version ? 'v' + a.version : '';
+      li.appendChild(ver);
+      for (const t of (a.tags || [])) {
+        const tag = document.createElement('span');
+        tag.className = 'tag ' + t.toLowerCase();
+        tag.textContent = t;
+        li.appendChild(tag);
+      }
+      if (!a.launchable) {
+        const nl = document.createElement('span');
+        nl.className = 'dnl'; nl.textContent = 'not launchable';
+        li.appendChild(nl);
+      }
+      ul.appendChild(li);
+    }
+    card.classList.toggle('on', agents.length > 0);
+    document.getElementById('rescanbtn').style.display = agents.length ? '' : 'none';
+    document.getElementById('secbanner').style.display = agents.length ? '' : 'none';
+  }
+
+  function renderAgentTabs() {
+    const bar = document.getElementById('agenttabs');
+    bar.innerHTML = '';
+    bar.className = '';
+    if (agentIds.length === 0) return;
+    bar.classList.add('has');
+    for (const id of agentIds) {
+      const b = document.createElement('button');
+      b.className = 'stab' + (activeAgent === id ? ' on' : '');
+      const count = dashState ? dashState.sessions.filter(s => s.shell === id).length : 0;
+      b.innerHTML = agentMap[id].name + '<span class="stab-count">(' + count + ')</span>';
+      b.addEventListener('click', () => {
+        activeAgent = (activeAgent === id ? 'all' : id);
+        syncShellSelect();
+        renderSessions(dashState);
+      });
+      bar.appendChild(b);
+    }
+  }
+
   function renderSessions(st) {
     dashState = st;
     renderShellTabs();
+    renderAgentTabs();
     renderSubTabs();
     renderRows();
 
@@ -707,6 +849,7 @@ INDEX_HTML = """<!doctype html>
   function visibleSessions() {
     let list = dashState ? dashState.sessions : [];
     if (activeShell !== 'all') list = list.filter(s => s.shell === activeShell);
+    if (activeAgent !== 'all') list = list.filter(s => s.shell === activeAgent);
     if (activeStatus === 'active') list = list.filter(s => s.status !== 'idle');
     else if (activeStatus === 'idle') list = list.filter(s => s.status === 'idle');
     return list;
@@ -731,6 +874,12 @@ INDEX_HTML = """<!doctype html>
       dot.className = 'sdot ' + s.status;
       const name = document.createElement('span');
       name.className = 'sname'; name.textContent = s.name;
+      row.appendChild(dot); row.appendChild(name);
+      if (agentMap[s.shell]) {
+        const badge = document.createElement('span');
+        badge.className = 'sagent'; badge.textContent = 'AGENT';
+        row.appendChild(badge);
+      }
       const stt = document.createElement('span');
       stt.className = 'sstatus ' + s.status; stt.textContent = s.status;
       const cr = document.createElement('span');
@@ -747,7 +896,7 @@ INDEX_HTML = """<!doctype html>
       });
 
       row.addEventListener('click', () => openTerminal(s.id, s.name));
-      row.appendChild(dot); row.appendChild(name); row.appendChild(stt);
+      row.appendChild(stt);
       row.appendChild(cr); row.appendChild(close);
       list.appendChild(row);
     }
@@ -755,10 +904,25 @@ INDEX_HTML = """<!doctype html>
 
   function syncShellSelect() {
     const sel = document.getElementById('newshell');
+    if (activeAgent !== 'all' && sel.querySelector('option[value="' + activeAgent + '"]')) {
+      sel.value = activeAgent;
+      showCwdField();
+      return;
+    }
     if (activeShell !== 'all' && sel.querySelector('option[value="' + activeShell + '"]')) {
       sel.value = activeShell;
+      showCwdField();
     }
   }
+
+  function showCwdField() {
+    const sel = document.getElementById('newshell');
+    const cwd = document.getElementById('newcwd');
+    const isAgent = !!agentMap[sel.value];
+    cwd.classList.toggle('on', isAgent);
+    if (isAgent && !cwd.value) cwd.value = agentDefaultCwd;
+  }
+  document.getElementById('newshell').addEventListener('change', showCwdField);
 
   function connect() {
     code = codeInput.value.trim();
@@ -779,6 +943,11 @@ INDEX_HTML = """<!doctype html>
         const obj = JSON.parse(d);
         if (obj.type === 'claimed') { showClaimed(obj); return; }
         if (obj.type === 'dashboard') { renderSessions(obj); return; }
+        if (obj.type === 'error') {
+          const msg = document.getElementById('dashmsg');
+          if (msg) msg.textContent = obj.message || 'error';
+          return;
+        }
       } catch (e) {}
     };
     dashWs.onclose = () => { if (!opened) gateerr.textContent = 'Wrong code. Try again.'; };
@@ -857,7 +1026,24 @@ INDEX_HTML = """<!doctype html>
     if (!dashWs || dashWs.readyState !== 1) return;
     const sel = document.getElementById('newshell');
     const shell = sel.value ? sel.value : '';
-    dashWs.send(JSON.stringify({type:'create', shell}));
+    const cwdIn = document.getElementById('newcwd');
+    const cwd = cwdIn.classList.contains('on') ? cwdIn.value.trim() : '';
+    const msg = document.getElementById('dashmsg');
+    if (msg) msg.textContent = '';
+    if (agentMap[shell] && !confirm(
+        'Agent sessions run with your local machine credentials and API keys.\n' +
+        'Start ' + agentMap[shell].name + (cwd ? ' in ' + cwd : '') + '?')) {
+      return;
+    }
+    dashWs.send(JSON.stringify({type:'create', shell, cwd}));
+  });
+  document.getElementById('rescanbtn').addEventListener('click', () => {
+    const btn = document.getElementById('rescanbtn');
+    btn.disabled = true;
+    fetch('/rescan', {method:'POST'}).then(r => r.json()).then(() => {
+      btn.disabled = false;
+      loadShells();
+    }).catch(() => { btn.disabled = false; });
   });
   document.getElementById('go').addEventListener('click', connect);
   codeInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') connect(); });
@@ -880,7 +1066,15 @@ async def shells():
         "available": [{"id": sid, "name": spec["name"]} for sid, spec in avail.items()],
         "default": default,
         "choice_allowed": SHELL_CHOICE,
+        "agents": agents.available_agents() if agents.ENABLED else [],
+        "agent_default_cwd": agents.DEFAULT_CWD if agents.ENABLED else "",
     }
+
+
+@app.post("/rescan")
+async def rescan_agents():
+    agents.rescan()
+    return {"agents": agents.available_agents() if agents.ENABLED else []}
 
 
 def _claim_owner(client_ip: str) -> None:
@@ -950,11 +1144,22 @@ async def _handle_dashboard(websocket: WebSocket, client_ip: str) -> None:
             t = obj.get("type")
             if t == "create":
                 shell = (obj.get("shell") or "").strip().lower()
+                cwd = (obj.get("cwd") or "").strip()
                 avail = available_shells()
                 if shell not in avail:
-                    shell = _DEFAULT_INSTALLED
+                    if not (agents.ENABLED and agents.is_agent(shell) and agents.can_launch(shell)):
+                        shell = _DEFAULT_INSTALLED
+                        cwd = ""
+                    elif cwd and not os.path.isdir(cwd):
+                        await websocket.send_text(json.dumps(
+                            {"type": "error", "message": "Working directory does not exist"}))
+                        continue
+                    elif not cwd:
+                        cwd = agents.spec_cwd(shell)
+                else:
+                    cwd = ""
                 with _state_lock:
-                    sess = _make_session(shell)
+                    sess = _make_session(shell, cwd)
                     _sessions[sess["id"]] = sess
                 await websocket.send_text(json.dumps(_dashboard_state()))
             elif t == "close":
@@ -1010,10 +1215,21 @@ async def _handle_attach(websocket: WebSocket, session_id: str, client_ip: str) 
             reader_alive = reader is not None and reader.is_alive()
 
         if not reattach:
-            spec = SHELLS[sess["shell_id"]]
-            env = dict(os.environ)
-            env.update(spec.get("env", {}))
-            proc = PtyProcess.spawn(spec["argv"](), dimensions=(30, 120), env=env)
+            sid = sess["shell_id"]
+            cwd = sess.get("cwd")
+            if sid in SHELLS:
+                spec = SHELLS[sid]
+                argv = spec["argv"]()
+                env = dict(os.environ)
+                env.update(spec.get("env", {}))
+                proc_cwd = None
+            else:
+                bin_path = agents.find_bin(sid)
+                argv = agents.launch_argv(sid, bin_path)
+                env = dict(os.environ)
+                env.update(agents.spec_env(sid))
+                proc_cwd = cwd or agents.spec_cwd(sid) or None
+            proc = PtyProcess.spawn(argv, cwd=proc_cwd, dimensions=(30, 120), env=env)
             loop = asyncio.get_event_loop()
             sess["proc"] = proc
             sess["loop"] = loop

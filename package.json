@@ -1,7 +1,7 @@
 {
   "name": "wtt-web",
-  "version": "1.1.3",
-  "description": "One-command web terminal tunnel for Windows: spawns a real shell via ConPTY, streams it to a browser over WebSocket, exposed through a Cloudflare quick tunnel. Prints URL, 2-digit code and QR code.",
+  "version": "1.2.0",
+  "description": "One-command web terminal tunnel for Windows: spawns a real shell via ConPTY, streams it to a browser over WebSocket, exposed through a Cloudflare quick tunnel. Detects installed AI agent harnesses (Claude Code, OpenCode, Codex, Aider, Gemini/agy, Goose, OpenHands...) and lets the owner launch them. Prints URL, 2-digit code and QR code.",
   "license": "MIT",
   "author": "Narendra Reddy",
   "bin": {
@@ -12,6 +12,7 @@
     "bin",
     "Start-WebTerminal.ps1",
     "terminal_server.py",
+    "agents.py",
     "requirements.txt",
     "README.md",
     "LICENSE"
@@ -31,7 +32,12 @@
     "remote",
     "powershell",
     "wsl",
-    "git-bash"
+    "git-bash",
+    "ai-agents",
+    "claude-code",
+    "opencode",
+    "codex",
+    "aider"
   ],
   "repository": {
     "type": "git",
