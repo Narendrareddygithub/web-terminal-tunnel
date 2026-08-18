@@ -1041,7 +1041,7 @@ INDEX_HTML = """<!doctype html>
     const msg = document.getElementById('dashmsg');
     if (msg) msg.textContent = '';
     if (agentMap[shell] && !confirm(
-        'Agent sessions run with your local machine credentials and API keys.\n' +
+        'Agent sessions run with your local machine credentials and API keys.\\n' +
         'Start ' + agentMap[shell].name + (cwd ? ' in ' + cwd : '') + '?')) {
       return;
     }
