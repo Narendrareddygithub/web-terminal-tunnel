@@ -396,25 +396,30 @@ INDEX_HTML = """<!doctype html>
   #dash .dash-head .title { font-size:16px; color:#eee; }
   #dash .dash-head .countdown { font-size:13px; opacity:0.8; margin-left:auto; }
   #sesslist { flex:1; overflow-y:auto; padding:10px 14px; font-family:Consolas, monospace; }
-  .sessrow {
-    display:flex; align-items:center; gap:10px; flex-wrap:wrap;
-    padding:10px 12px; margin-bottom:8px; background:#252526;
-    border:1px solid #333; border-radius:8px;
+  #pills { display:flex; flex-wrap:wrap; gap:10px; }
+  .pill {
+    display:flex; align-items:center; gap:8px;
+    padding:8px 14px; background:#252526;
+    border:1px solid #333; border-radius:999px; cursor:pointer;
+    font-family:Consolas, monospace; font-size:14px; color:#eee;
+    user-select:none;
   }
-  .sessrow .sess-name { font-size:15px; color:#eee; min-width:110px; }
-  .sessrow .sess-shell {
-    font-size:13px; color:#9cdcfe; background:#1e1e1e; padding:2px 8px; border-radius:4px;
+  .pill:hover { border-color:#555; background:#2d2d30; }
+  .pill.attached { border-color:#2d6cdf; background:#1f3553; }
+  .pill .pill-dot { width:10px; height:10px; border-radius:50%; flex:0 0 auto; }
+  .pill-dot.idle { background:#888; }
+  .pill-dot.running { background:#4ec9b0; }
+  .pill-dot.attached { background:#2d6cdf; }
+  .pill .pill-shell {
+    font-size:11px; color:#9cdcfe; background:#1e1e1e; padding:1px 8px; border-radius:999px;
   }
-  .sessrow .sess-status { font-size:12px; padding:2px 8px; border-radius:4px; text-transform:capitalize; }
-  .sess-status.idle { color:#bbb; background:#333; }
-  .sess-status.running, .sess-status.attached { color:#4ec9b0; background:#1f3b33; }
-  .sessrow .sess-created { font-size:12px; color:#888; margin-left:auto; }
-  .sessrow button {
-    font-family:Consolas, monospace; font-size:13px; padding:6px 14px; cursor:pointer;
-    background:#2d6cdf; color:#fff; border:none; border-radius:6px;
+  .pill .pill-created { font-size:11px; color:#888; }
+  .pill .pill-close {
+    margin-left:4px; background:none; border:none; color:#888; cursor:pointer;
+    font-size:16px; line-height:1; padding:2px 4px; border-radius:50%;
   }
-  .sessrow button.close { background:#3a3a3a; color:#f88; }
-  .sessrow button.close:hover { background:#4a4a4a; }
+  .pill .pill-close:hover { color:#f88; background:#3a3a3a; }
+  #active-count { font-size:12px; color:#4ec9b0; background:#1f3b33; padding:3px 10px; border-radius:999px; }
   #dash .dash-new {
     display:flex; gap:8px; align-items:center; flex-wrap:wrap;
     padding:10px 14px; border-top:1px solid #333;
@@ -495,6 +500,7 @@ INDEX_HTML = """<!doctype html>
 <div id="dash">
   <div class="dash-head">
     <span class="title">Sessions</span>
+    <span id="active-count"></span>
     <span class="countdown" id="dash-left"></span>
   </div>
   <div id="sesslist"></div>
@@ -562,6 +568,10 @@ INDEX_HTML = """<!doctype html>
     }
   }).catch(() => {});
 
+  function decodeSeq(s) {
+    return s.replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
+  }
+
   function fmtCountdown(sec) {
     sec = Math.max(0, Math.floor(sec));
     return String(Math.floor(sec / 60)).padStart(2, '0') + ':' + String(sec % 60).padStart(2, '0');
@@ -590,36 +600,41 @@ INDEX_HTML = """<!doctype html>
   function renderSessions(st) {
     const list = document.getElementById('sesslist');
     list.innerHTML = '';
+    const pills = document.createElement('div');
+    pills.id = 'pills';
     for (const s of st.sessions) {
-      const row = document.createElement('div');
-      row.className = 'sessrow';
+      const pill = document.createElement('div');
+      pill.className = 'pill' + (s.status === 'attached' ? ' attached' : '');
+      pill.title = 'Connect to ' + s.name;
 
+      const dot = document.createElement('span');
+      dot.className = 'pill-dot ' + s.status;
       const name = document.createElement('span');
-      name.className = 'sess-name'; name.textContent = s.name;
+      name.className = 'pill-name'; name.textContent = s.name;
       const sh = document.createElement('span');
-      sh.className = 'sess-shell'; sh.textContent = s.shell;
-      const stt = document.createElement('span');
-      stt.className = 'sess-status ' + s.status; stt.textContent = s.status;
+      sh.className = 'pill-shell'; sh.textContent = s.shell;
       const cr = document.createElement('span');
-      cr.className = 'sess-created';
+      cr.className = 'pill-created';
       cr.textContent = new Date(s.created * 1000).toLocaleTimeString();
 
-      const conn = document.createElement('button');
-      conn.textContent = 'Connect';
-      conn.addEventListener('click', () => openTerminal(s.id, s.name));
-
       const close = document.createElement('button');
-      close.className = 'close'; close.textContent = 'Close';
-      close.addEventListener('click', () => {
+      close.className = 'pill-close'; close.textContent = '×';
+      close.addEventListener('click', (e) => {
+        e.stopPropagation();
         if (dashWs && dashWs.readyState === 1) {
           dashWs.send(JSON.stringify({type:'close', id:s.id}));
         }
       });
 
-      row.appendChild(name); row.appendChild(sh); row.appendChild(stt);
-      row.appendChild(cr); row.appendChild(conn); row.appendChild(close);
-      list.appendChild(row);
+      pill.addEventListener('click', () => openTerminal(s.id, s.name));
+      pill.appendChild(dot); pill.appendChild(name); pill.appendChild(sh);
+      pill.appendChild(cr); pill.appendChild(close);
+      pills.appendChild(pill);
     }
+    list.appendChild(pills);
+
+    document.getElementById('active-count').textContent =
+      st.sessions.length + ' session' + (st.sessions.length === 1 ? '' : 's');
 
     const left = document.getElementById('dash-left');
     if (st.remaining < 0) {
@@ -662,6 +677,7 @@ INDEX_HTML = """<!doctype html>
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
     const termDiv = document.getElementById('terminal');
     document.getElementById('dash').style.display = 'none';
+    document.getElementById('app').style.display = 'flex';
     document.getElementById('term-tag').textContent = name + ' (' + sid + ')';
     document.getElementById('backbar').style.display = 'flex';
     termDiv.style.display = 'block';
@@ -698,7 +714,7 @@ INDEX_HTML = """<!doctype html>
 
     document.getElementById('toolbar').querySelectorAll('button').forEach(btn => {
       btn.addEventListener('click', () => {
-        if (termWs) termWs.send(JSON.stringify({type:'input', data: btn.dataset.seq}));
+        if (termWs) termWs.send(JSON.stringify({type:'input', data: decodeSeq(btn.dataset.seq)}));
         term.focus();
       });
     });
@@ -710,6 +726,7 @@ INDEX_HTML = """<!doctype html>
     if (term) { term.dispose(); term = null; fitAddon = null; }
     document.getElementById('terminal').style.display = 'none';
     document.getElementById('backbar').style.display = 'none';
+    document.getElementById('app').style.display = 'none';
     document.getElementById('dash').style.display = 'flex';
     if (dashWs && dashWs.readyState === 1) {
       dashWs.send(JSON.stringify({type:'list'}));

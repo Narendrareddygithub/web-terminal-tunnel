@@ -11,3 +11,6 @@ __pycache__/
 
 # npm auth token (never commit)
 .npmrc
+
+# environment variables
+.env
