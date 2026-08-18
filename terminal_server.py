@@ -362,8 +362,20 @@ INDEX_HTML = """<!doctype html>
 <title>Remote Terminal</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css"/>
 <style>
-  * { box-sizing: border-box; }
-  html, body { margin:0; padding:0; background:#1e1e1e; height:100%; overflow:hidden; }
+  :root {
+    --bg:#1e1e1e; --surface:#252526; --surface2:#2d2d30; --border:#3a3a3a;
+    --text:#e6e6e6; --muted:#9a9a9a;
+    --accent:#2d6cdf; --accent2:#4f8ae8;
+    --ok:#4ec9b0; --okbg:#1f3b33;
+    --warn:#ff9d00; --danger:#f88;
+    --agent:#c4b5fd; --agentbg:#2a1d4d;
+    --radius:12px; --touch:44px;
+  }
+  * { box-sizing:border-box; }
+  html, body {
+    margin:0; padding:0; background:var(--bg); height:100%; overflow:hidden;
+    color:var(--text); font-family:Consolas, monospace;
+  }
   #app { height:100vh; display:none; flex-direction:column; }
   #terminal { flex:1; min-height:0; padding:4px; }
   #loaderr {
@@ -373,192 +385,236 @@ INDEX_HTML = """<!doctype html>
     padding:10px 14px; background:#7a1f1f; border-bottom:1px solid #a33;
   }
 
+  /* ---- Gate ---- */
   #gate {
     height:100vh; display:flex; flex-direction:column; align-items:center; justify-content:center;
-    font-family:Consolas, monospace; color:#ddd; gap:16px; padding:16px;
+    gap:18px; padding:16px; text-align:center;
   }
   #gate .label { font-size:15px; opacity:0.8; }
   #gate input {
-    font-family:Consolas, monospace; font-size:36px; letter-spacing:14px; text-align:center;
-    width:140px; padding:10px 4px 10px 18px; background:#111; color:#eee;
-    border:1px solid #444; border-radius:8px;
+    font-family:Consolas, monospace; font-size:24px; letter-spacing:12px; text-align:center;
+    width:150px; min-height:52px; padding:12px 4px 12px 16px; background:#111; color:var(--text);
+    border:1px solid var(--border); border-radius:10px;
   }
+  #gate input:focus { border-color:var(--accent); outline:none; }
   #gate button {
-    font-family:Consolas, monospace; font-size:16px; padding:10px 24px; cursor:pointer;
-    background:#2d6cdf; color:#fff; border:none; border-radius:6px;
+    font-family:Consolas, monospace; font-size:16px; min-height:52px; padding:12px 32px; cursor:pointer;
+    background:var(--accent); color:#fff; border:none; border-radius:10px;
   }
-  #gateerr { color:#f55; font-size:13px; min-height:16px; }
+  #gate button:active { background:var(--accent2); }
+  #gateerr { color:var(--danger); font-size:13px; min-height:16px; }
 
-  /* Session-already-claimed screen */
+  /* ---- Claimed (watcher) ---- */
   #claimed {
     height:100vh; display:none; flex-direction:column; align-items:center; justify-content:center;
-    font-family:Consolas, monospace; color:#ddd; gap:12px; padding:24px; text-align:center;
+    gap:14px; padding:24px; text-align:center;
   }
-  #claimed .claim-title { font-size:18px; color:#ff9d00; }
+  #claimed .claim-title { font-size:18px; color:var(--warn); }
   #claimed .claim-info { font-size:14px; opacity:0.9; line-height:1.7; }
-  #claimed .claim-count { font-size:30px; font-weight:bold; color:#eee; }
+  #claimed .claim-count { font-size:34px; font-weight:bold; color:var(--text); }
 
-  /* Dashboard */
-  #dash { display:none; height:100vh; flex-direction:column; }
-  #dash .dash-head {
-    display:flex; align-items:center; gap:10px; flex-wrap:wrap;
-    padding:10px 14px; font-family:Consolas, monospace; color:#ddd;
-    border-bottom:1px solid #333;
-  }
-  #dash .dash-head .title { font-size:16px; color:#eee; }
-  #dash .dash-head .countdown { font-size:13px; opacity:0.8; margin-left:auto; }
-  #shelltabs, #subtabs {
-    display:flex; flex-wrap:wrap; align-items:center;
-    padding:8px 14px 0; font-family:Consolas, monospace;
-  }
-  /* shell row: VS Code boxed editor tabs */
-  #shelltabs { gap:2px; background:#2d2d30; padding:4px 14px 0; }
-  .stab {
-    font-family:Consolas, monospace; font-size:13px;
-    padding:6px 14px; background:#252526; color:#bbb;
-    border:1px solid #2a2a2a; border-bottom:none;
-    border-radius:4px 4px 0 0; cursor:pointer; position:relative;
-  }
-  .stab:hover { color:#eee; background:#2d2d30; }
-  .stab.on { background:#1e1e1e; color:#eee; }
-  .stab.on::before {
-    content:''; position:absolute; top:-1px; left:-1px; right:-1px; height:2px;
-    background:#2d6cdf; border-radius:4px 4px 0 0;
-  }
-  .stab .stab-count { opacity:0.75; margin-left:5px; font-size:11px; }
-  /* status row: segmented control */
-  #subtabs {
-    gap:0; margin:8px 14px; padding:0; align-self:flex-start;
-    border:1px solid #333; border-radius:6px; overflow:hidden;
-  }
-  .stab.sub {
-    font-size:12px; padding:5px 12px; border:none; border-radius:0;
-    background:#252526; color:#bbb;
-  }
-  .stab.sub + .stab.sub { border-left:1px solid #333; }
-  .stab.sub:hover { background:#2d2d30; }
-  .stab.sub.on { background:#2d6cdf; color:#fff; }
-  /* agent tab row (distinct purple accent) */
-  #agenttabs {
-    display:none; flex-wrap:wrap; align-items:center; gap:2px;
-    background:#2d2d30; padding:4px 14px 0; font-family:Consolas, monospace;
-  }
-  #agenttabs.has { display:flex; }
-  #agenttabs .stab.on { color:#e9d5ff; }
-  #agenttabs .stab.on::before { background:#8b5cf6; }
-  .tag { font-size:10px; padding:1px 6px; border-radius:999px; border:1px solid #555; color:#aaa; margin-left:6px; }
-  .tag.eol { color:#ff9d00; border-color:#7a4f00; }
-  .tag.custom { color:#c4b5fd; border-color:#5b3a9e; }
-  /* landing-page detected-harnesses card */
+  /* ---- Landing detected-harnesses card ---- */
   #detect {
-    display:none; max-width:480px; width:100%; background:#252526;
-    border:1px solid #333; border-radius:10px; padding:14px 16px;
-    font-family:Consolas, monospace;
+    display:none; max-width:480px; width:100%; background:var(--surface);
+    border:1px solid var(--border); border-radius:var(--radius); padding:14px 16px;
   }
   #detect.on { display:block; }
   #detect h3 { margin:0 0 8px; font-size:13px; color:#9cdcfe; font-weight:normal; }
   #detect ul { list-style:none; margin:0; padding:0; }
-  #detect li { font-size:13px; color:#ddd; padding:3px 0; display:flex; align-items:center; flex-wrap:wrap; gap:6px; }
-  #detect .dver { color:#888; font-size:12px; }
-  #detect .dnl { color:#888; font-size:11px; margin-left:auto; }
-  /* agent working-directory input in the create row */
-  #newcwd {
-    font-family:Consolas, monospace; font-size:13px; padding:8px 10px;
-    background:#111; color:#eee; border:1px solid #444; border-radius:6px;
-    display:none; min-width:220px;
+  #detect li { font-size:13px; color:var(--text); padding:3px 0; display:flex; align-items:center; flex-wrap:wrap; gap:6px; }
+  #detect .dver { color:var(--muted); font-size:12px; }
+  #detect .dnl { color:var(--muted); font-size:11px; margin-left:auto; }
+  .tag { font-size:10px; padding:2px 8px; border-radius:999px; border:1px solid #555; color:#aaa; }
+  .tag.eol { color:var(--warn); border-color:#7a4f00; }
+  .tag.custom { color:var(--agent); border-color:#5b3a9e; }
+
+  /* ---- Dashboard ---- */
+  #dash { display:none; height:100vh; flex-direction:column; }
+  .appbar {
+    display:flex; align-items:center; gap:12px;
+    padding:12px 16px; padding-top:calc(12px + env(safe-area-inset-top));
+    background:var(--surface2); border-bottom:1px solid var(--border);
   }
-  #newcwd.on { display:inline-block; }
-  #dashmsg { font-size:12px; color:#ff9d00; }
-  .srow .sagent {
-    font-size:10px; padding:1px 6px; border-radius:999px;
-    background:#2a1d4d; color:#c4b5fd; border:1px solid #5b3a9e;
+  .appbar .title { font-size:18px; color:var(--text); font-weight:600; }
+  .appbar .countdown { font-size:12px; color:var(--muted); margin-left:auto; }
+  #active-count {
+    font-size:12px; color:var(--ok); background:var(--okbg);
+    padding:5px 12px; border-radius:999px; white-space:nowrap;
   }
-  #rescanbtn {
-    font-family:Consolas, monospace; font-size:12px; padding:4px 10px;
-    background:#3a3a3a; color:#ddd; border:1px solid #4a4a4a; border-radius:6px; cursor:pointer;
+  .iconbtn {
+    flex:0 0 auto; width:var(--touch); height:var(--touch); border-radius:50%;
+    background:none; border:1px solid var(--border); color:var(--muted);
+    font-size:18px; line-height:1; cursor:pointer;
+    display:inline-flex; align-items:center; justify-content:center;
   }
-  #rescanbtn:hover { background:#4a4a4a; }
-  .secbanner { font-size:12px; color:#ff9d00; padding:6px 14px; border-bottom:1px solid #333; font-family:Consolas, monospace; }
-  #sesslist { flex:1; overflow-y:auto; padding:10px 14px; font-family:Consolas, monospace; }
-  .srow {
-    display:flex; align-items:center; gap:10px; flex-wrap:wrap;
-    padding:9px 12px; margin-bottom:6px; background:#252526;
-    border:1px solid #333; border-radius:8px; cursor:pointer;
+  .iconbtn:active { color:var(--text); background:var(--surface); }
+  .iconbtn[disabled] { opacity:0.5; }
+
+  /* dismissible security banner */
+  .secbanner {
+    display:flex; align-items:center; gap:10px;
+    font-size:12px; color:var(--warn); padding:8px 16px;
+    border-bottom:1px solid var(--border);
   }
-  .srow:hover { border-color:#555; background:#2d2d30; }
-  .srow .sdot { width:10px; height:10px; border-radius:50%; flex:0 0 auto; }
+  .secbanner button {
+    flex:0 0 auto; width:var(--touch); height:var(--touch); margin-left:auto;
+    background:none; border:none; color:var(--muted); font-size:18px; cursor:pointer; border-radius:50%;
+  }
+  .secbanner button:active { color:var(--warn); background:var(--surface); }
+
+  /* filter chip rail: horizontal scroll-snap carousel */
+  #chiprail {
+    display:flex; align-items:center; gap:8px; overflow-x:auto;
+    padding:10px 16px; scroll-snap-type:x mandatory; -webkit-overflow-scrolling:touch;
+    scrollbar-width:none;
+  }
+  #chiprail::-webkit-scrollbar { display:none; }
+  .chip {
+    flex:0 0 auto; min-height:var(--touch); padding:10px 16px;
+    border-radius:999px; border:1px solid var(--border); background:var(--surface);
+    color:var(--muted); font-size:14px; cursor:pointer; white-space:nowrap;
+    scroll-snap-align:start;
+  }
+  .chip:active { background:var(--surface2); }
+  .chip.on { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .chip .cnt { opacity:0.8; margin-left:6px; }
+  .railsep { flex:0 0 auto; color:var(--border); font-size:14px; padding:0 2px; user-select:none; }
+
+  /* session cards: full-width tap-to-connect */
+  #sesslist { flex:1; overflow-y:auto; padding:12px 16px; display:flex; flex-direction:column; gap:10px; }
+  .scard {
+    display:flex; align-items:center; gap:12px; width:100%;
+    padding:14px 16px; background:var(--surface); border:1px solid var(--border);
+    border-radius:var(--radius); cursor:pointer; min-height:60px;
+  }
+  .scard:active { background:var(--surface2); }
+  .scard .sdot { width:12px; height:12px; border-radius:50%; flex:0 0 auto; }
   .sdot.idle { background:#888; }
-  .sdot.running { background:#4ec9b0; }
-  .sdot.attached { background:#2d6cdf; }
-  .srow .sname { font-size:14px; color:#eee; }
-  .srow .sstatus {
-    font-size:12px; padding:1px 8px; border-radius:999px;
-    text-transform:capitalize; color:#bbb; background:#333;
+  .sdot.running { background:var(--ok); }
+  .sdot.attached { background:var(--accent); }
+  .scard .sbody { flex:1; min-width:0; }
+  .scard .sname { font-size:15px; color:var(--text); font-weight:600; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .scard .sagent {
+    font-size:10px; padding:2px 8px; border-radius:999px;
+    background:var(--agentbg); color:var(--agent); border:1px solid #5b3a9e; font-weight:normal;
   }
-  .srow .sstatus.running, .srow .sstatus.attached { color:#4ec9b0; background:#1f3b33; }
-  .srow .screated { font-size:11px; color:#888; margin-left:auto; }
-  .srow .sclose {
-    background:none; border:none; color:#888; cursor:pointer;
-    font-size:16px; line-height:1; padding:2px 6px; border-radius:50%;
+  .scard .smeta { font-size:12px; color:var(--muted); margin-top:3px; display:flex; align-items:center; gap:8px; }
+  .sstatus { font-size:11px; padding:3px 10px; border-radius:999px; text-transform:capitalize; color:var(--muted); background:#333; }
+  .sstatus.running { color:var(--ok); background:var(--okbg); }
+  .sstatus.attached { color:var(--accent2); background:#1d2c4d; }
+  .scard .screated { color:var(--muted); }
+  .scard .sclose {
+    flex:0 0 auto; width:var(--touch); height:var(--touch); border-radius:50%;
+    background:none; border:none; color:var(--muted); font-size:22px; line-height:1; cursor:pointer;
   }
-  .srow .sclose:hover { color:#f88; background:#3a3a3a; }
-  #empty { color:#666; font-size:13px; padding:14px; }
-  #active-count { font-size:12px; color:#4ec9b0; background:#1f3b33; padding:3px 10px; border-radius:999px; }
-  #dash .dash-new {
-    display:flex; gap:8px; align-items:center; flex-wrap:wrap;
-    padding:10px 14px; border-top:1px solid #333;
-    font-family:Consolas, monospace; color:#ddd;
+  .scard .sclose:active { color:var(--danger); background:var(--surface); }
+  #empty { color:var(--muted); font-size:13px; padding:20px 14px; text-align:center; }
+
+  /* toast (errors / notices) */
+  #dashmsg {
+    position:fixed; left:16px; right:16px; bottom:96px; z-index:45;
+    background:#3a1f1f; border:1px solid #a33; color:#ffd9d9;
+    padding:10px 14px; border-radius:10px; text-align:center; font-size:13px;
+    display:none;
   }
-  #dash .dash-new select {
-    font-family:Consolas, monospace; font-size:14px; padding:8px 10px;
-    background:#111; color:#eee; border:1px solid #444; border-radius:6px;
+  #dashmsg.on { display:block; }
+
+  /* FAB: opens the New-session bottom sheet */
+  #fab {
+    position:fixed; right:20px; bottom:calc(24px + env(safe-area-inset-bottom)); z-index:40;
+    width:56px; height:56px; border-radius:50%;
+    background:var(--accent); color:#fff; border:none; font-size:28px; line-height:1;
+    box-shadow:0 4px 14px rgba(0,0,0,0.45); cursor:pointer;
+    display:none; align-items:center; justify-content:center;
   }
-  #dash .dash-new button {
-    font-family:Consolas, monospace; font-size:14px; padding:8px 18px; cursor:pointer;
-    background:#2d6cdf; color:#fff; border:none; border-radius:6px;
+  #fab.on { display:flex; }
+  #fab:active { background:var(--accent2); }
+
+  /* modal bottom sheet for the New-session form */
+  #sheetwrap { position:fixed; inset:0; z-index:60; display:none; }
+  #sheetwrap.on { display:block; }
+  #scrim { position:absolute; inset:0; background:rgba(0,0,0,0.55); }
+  .sheet {
+    position:absolute; left:0; right:0; bottom:0;
+    background:var(--surface); border-radius:16px 16px 0 0;
+    padding:10px 20px calc(20px + env(safe-area-inset-bottom));
+    transform:translateY(105%); transition:transform 0.25s ease;
+    max-height:85vh; overflow-y:auto;
   }
-  #dash .dash-new .hint { font-size:12px; opacity:0.6; }
+  #sheetwrap.on .sheet { transform:translateY(0); }
+  .sheet .grab { width:40px; height:4px; border-radius:2px; background:var(--border); margin:0 auto 10px; }
+  .sheet .shead { display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; }
+  .sheet .stitle { font-size:17px; font-weight:600; color:var(--text); }
+  .field { display:flex; flex-direction:column; gap:6px; margin-bottom:14px; }
+  .field label { font-size:13px; color:var(--muted); }
+  .field select, .field input {
+    width:100%; min-height:48px; padding:12px;
+    background:var(--bg); border:1px solid var(--border); border-radius:10px;
+    color:var(--text); font-size:16px;
+  }
+  .field select:focus, .field input:focus { border-color:var(--accent); outline:none; }
+  .field input[disabled] { opacity:0.45; }
+  #addbtn {
+    width:100%; min-height:52px; border-radius:12px; border:none; cursor:pointer;
+    background:var(--accent); color:#fff; font-size:16px; font-weight:600;
+  }
+  #addbtn:active { background:var(--accent2); }
+  .hint { font-size:11px; opacity:0.6; margin-left:6px; }
 
   /* Terminal back bar */
   #backbar {
-    display:none; align-items:center; gap:10px; padding:6px 10px;
-    background:#252526; border-bottom:1px solid #3a3a3a;
-    font-family:Consolas, monospace;
+    display:none; align-items:center; gap:10px; padding:8px 10px;
+    padding-top:calc(8px + env(safe-area-inset-top));
+    background:var(--surface2); border-bottom:1px solid var(--border);
   }
   #backbar button {
-    font-family:Consolas, monospace; font-size:13px; padding:6px 14px;
-    background:#3a3a3a; color:#eee; border:1px solid #4a4a4a; border-radius:6px; cursor:pointer;
+    font-family:Consolas, monospace; font-size:14px; min-height:44px; padding:10px 16px;
+    background:#3a3a3a; color:var(--text); border:1px solid #4a4a4a; border-radius:8px; cursor:pointer;
   }
   #backbar .sess-tag { color:#9cdcfe; font-size:13px; }
 
   /* Touch toolbar: keys a phone keyboard doesn't send */
   #toolbar {
     display:none;
-    flex-wrap: nowrap;
+    flex-wrap:nowrap;
     overflow-x:auto;
     gap:6px;
-    padding:6px;
-    background:#252526;
-    border-top:1px solid #3a3a3a;
-    -webkit-overflow-scrolling: touch;
+    padding:6px; padding-bottom:calc(6px + env(safe-area-inset-bottom));
+    background:var(--surface2);
+    border-top:1px solid var(--border);
+    -webkit-overflow-scrolling:touch;
   }
   #toolbar button {
-    flex: 0 0 auto;
+    flex:0 0 auto;
     font-family:Consolas, monospace;
     font-size:13px;
-    padding:10px 12px;
+    min-height:44px;
+    padding:12px 14px;
     background:#3a3a3a;
-    color:#eee;
+    color:var(--text);
     border:1px solid #4a4a4a;
-    border-radius:6px;
+    border-radius:8px;
     white-space:nowrap;
   }
-  #toolbar button:active { background:#2d6cdf; }
+  #toolbar button:active { background:var(--accent); }
+
+  /* Desktop: centered container + 2-col card grid */
+  @media (min-width: 768px) {
+    .appbar, .secbanner {
+      padding-left:max(16px, calc((100% - 900px)/2 + 16px));
+      padding-right:max(16px, calc((100% - 900px)/2 + 16px));
+    }
+    #chiprail { max-width:900px; width:100%; margin:0 auto; }
+    #sesslist {
+      max-width:900px; width:100%; margin:0 auto;
+      display:grid; grid-template-columns:repeat(2, 1fr); align-content:start;
+    }
+  }
 
   /* Show the touch toolbar on small / coarse-pointer (touch) screens */
   @media (pointer: coarse), (max-width: 700px) {
     #toolbar { display:flex; }
-    #gate input { font-size:30px; letter-spacing:10px; width:110px; }
+    #gate input { font-size:22px; letter-spacing:10px; width:120px; }
   }
 </style>
 </head>
@@ -586,24 +642,38 @@ INDEX_HTML = """<!doctype html>
 </div>
 
 <div id="dash">
-  <div class="dash-head">
+  <div class="appbar">
     <span class="title">Sessions</span>
     <span id="active-count"></span>
-    <button id="rescanbtn" title="Re-detect installed AI harnesses">&#8635; Rescan agents</button>
+    <button id="rescanbtn" class="iconbtn" title="Re-detect installed AI harnesses">&#8635;</button>
     <span class="countdown" id="dash-left"></span>
   </div>
-  <div class="secbanner" id="secbanner">Agent sessions run with your local machine credentials and API keys.</div>
-  <div id="shelltabs"></div>
-  <div id="agenttabs"></div>
-  <div id="subtabs"></div>
+  <div class="secbanner" id="secbanner">
+    <span>Agent sessions run with your local machine credentials and API keys.</span>
+    <button id="secbanner-x" aria-label="Dismiss notice">&times;</button>
+  </div>
+  <div id="chiprail"></div>
   <div id="sesslist"></div>
-  <div class="dash-new">
-    <span>New session:</span>
-    <select id="newshell"></select>
-    <input id="newcwd" placeholder="working directory (agents)" spellcheck="false"/>
-    <button id="addbtn">Add</button>
-    <span class="hint" id="addhint"></span>
-    <span id="dashmsg"></span>
+</div>
+
+<button id="fab" aria-label="New session">+</button>
+<div id="sheetwrap">
+  <div id="scrim"></div>
+  <div class="sheet">
+    <div class="grab"></div>
+    <div class="shead">
+      <span class="stitle">New session</span>
+      <button class="iconbtn" id="sheetclose" aria-label="Close">&times;</button>
+    </div>
+    <div class="field">
+      <label for="newshell">Agent / Environment</label>
+      <select id="newshell"></select>
+    </div>
+    <div class="field">
+      <label for="newcwd">Working directory <span class="hint" id="addhint"></span></label>
+      <input id="newcwd" placeholder="~ (agent default)" spellcheck="false" autocomplete="off"/>
+    </div>
+    <button id="addbtn">Add session</button>
   </div>
 </div>
 
@@ -643,6 +713,7 @@ INDEX_HTML = """<!doctype html>
   let term = null;
   let fitAddon = null;
   let countTimer = null;
+  let toastTimer = null;
   let shellMap = {};    // shell id -> display name
   let dashState = null; // last dashboard payload
   let activeShell = 'all';
@@ -657,8 +728,17 @@ INDEX_HTML = """<!doctype html>
     codeInput.value = codeInput.value.replace(/[^0-9]/g, '').slice(0, 2);
   });
 
-  // Populate the New-session dropdown (shells + agents), the shell tab map,
-  // the landing-page detected card and the agent tab row.
+  function showToast(msg) {
+    const el = document.getElementById('dashmsg');
+    if (!el) return;
+    el.textContent = msg;
+    el.classList.add('on');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.remove('on'), 4000);
+  }
+
+  // Populate the New-session dropdown (shells + agents), the chip rail and the
+  // landing-page detected card.
   function loadShells() {
     fetch('/shells').then(r => r.json()).then(data => {
       shellMap = {};
@@ -694,8 +774,8 @@ INDEX_HTML = """<!doctype html>
       if (!data.choice_allowed) {
         document.getElementById('addhint').textContent = '(shell fixed by owner)';
       }
+      showCwdField();
       renderDetectCard(ag);
-      renderAgentTabs();
       if (dashState) renderSessions(dashState);
     }).catch(() => {});
   }
@@ -717,6 +797,8 @@ INDEX_HTML = """<!doctype html>
     document.getElementById('dash').style.display = 'none';
     document.getElementById('app').style.display = 'none';
     document.getElementById('gate').style.display = 'none';
+    document.getElementById('fab').classList.remove('on');
+    closeSheet();
     document.getElementById('claim-ip').textContent = obj.ip || 'unknown';
     const d = new Date((obj.connected_at || 0) * 1000);
     document.getElementById('claim-at').textContent = isNaN(d.getTime()) ? 'n/a' : d.toLocaleString();
@@ -760,34 +842,68 @@ INDEX_HTML = """<!doctype html>
     }
     card.classList.toggle('on', agents.length > 0);
     document.getElementById('rescanbtn').style.display = agents.length ? '' : 'none';
-    document.getElementById('secbanner').style.display = agents.length ? '' : 'none';
+    const dismissed = sessionStorage.getItem('secbanner-dismissed') === '1';
+    document.getElementById('secbanner').style.display = (agents.length && !dismissed) ? '' : 'none';
   }
 
-  function renderAgentTabs() {
-    const bar = document.getElementById('agenttabs');
-    bar.innerHTML = '';
-    bar.className = '';
-    if (agentIds.length === 0) return;
-    bar.classList.add('has');
-    for (const id of agentIds) {
-      const b = document.createElement('button');
-      b.className = 'stab' + (activeAgent === id ? ' on' : '');
-      const count = dashState ? dashState.sessions.filter(s => s.shell === id).length : 0;
-      b.innerHTML = agentMap[id].name + '<span class="stab-count">(' + count + ')</span>';
-      b.addEventListener('click', () => {
-        activeAgent = (activeAgent === id ? 'all' : id);
-        syncShellSelect();
-        renderSessions(dashState);
-      });
-      bar.appendChild(b);
+  function chip(label, count, on, cb) {
+    const b = document.createElement('button');
+    b.className = 'chip' + (on ? ' on' : '');
+    b.innerHTML = label + (count > 0 ? '<span class="cnt">(' + count + ')</span>' : '');
+    b.addEventListener('click', cb);
+    return b;
+  }
+
+  // One horizontally scrollable chip rail: status | shells | agents.
+  function renderChipRail() {
+    const rail = document.getElementById('chiprail');
+    rail.innerHTML = '';
+    const all = dashState ? dashState.sessions : [];
+    const scoped = all.filter(s =>
+      (activeShell === 'all' || s.shell === activeShell) &&
+      (activeAgent === 'all' || s.shell === activeAgent));
+    const cntStatus = (kind) => scoped.filter(s =>
+      kind === 'all' ? true : kind === 'active' ? s.status !== 'idle' : s.status === 'idle').length;
+
+    rail.appendChild(chip('All', cntStatus('all'), activeStatus === 'all',
+      () => { activeStatus = 'all'; renderSessions(dashState); }));
+    rail.appendChild(chip('Active', cntStatus('active'), activeStatus === 'active',
+      () => { activeStatus = 'active'; renderSessions(dashState); }));
+    rail.appendChild(chip('Idle', cntStatus('idle'), activeStatus === 'idle',
+      () => { activeStatus = 'idle'; renderSessions(dashState); }));
+
+    const shells = shellTabIds();
+    if (shells.length) {
+      const sep = document.createElement('span');
+      sep.className = 'railsep'; sep.textContent = '|';
+      rail.appendChild(sep);
+      for (const id of shells) {
+        const cnt = all.filter(s => s.shell === id).length;
+        rail.appendChild(chip(shellMap[id] || id, cnt, activeShell === id, () => {
+          activeShell = (activeShell === id ? 'all' : id);
+          syncShellSelect();
+          renderSessions(dashState);
+        }));
+      }
+    }
+    if (agentIds.length) {
+      const sep = document.createElement('span');
+      sep.className = 'railsep'; sep.textContent = '|';
+      rail.appendChild(sep);
+      for (const id of agentIds) {
+        const cnt = all.filter(s => s.shell === id).length;
+        rail.appendChild(chip(agentMap[id].name, cnt, activeAgent === id, () => {
+          activeAgent = (activeAgent === id ? 'all' : id);
+          syncShellSelect();
+          renderSessions(dashState);
+        }));
+      }
     }
   }
 
   function renderSessions(st) {
     dashState = st;
-    renderShellTabs();
-    renderAgentTabs();
-    renderSubTabs();
+    renderChipRail();
     renderRows();
 
     document.getElementById('active-count').textContent =
@@ -814,43 +930,6 @@ INDEX_HTML = """<!doctype html>
     return Object.keys(seen);
   }
 
-  function renderShellTabs() {
-    const bar = document.getElementById('shelltabs');
-    bar.innerHTML = '';
-    const mk = (id, label) => {
-      const b = document.createElement('button');
-      b.className = 'stab' + (activeShell === id ? ' on' : '');
-      const count = dashState ? dashState.sessions.filter(s => id === 'all' || s.shell === id).length : 0;
-      b.innerHTML = label + '<span class="stab-count">(' + count + ')</span>';
-      b.addEventListener('click', () => {
-        activeShell = id;
-        syncShellSelect();
-        renderSessions(dashState);
-      });
-      return b;
-    };
-    bar.appendChild(mk('all', 'All'));
-    for (const id of shellTabIds()) bar.appendChild(mk(id, shellMap[id] || id));
-  }
-
-  function renderSubTabs() {
-    const bar = document.getElementById('subtabs');
-    bar.innerHTML = '';
-    const base = dashState ? dashState.sessions.filter(s => activeShell === 'all' || s.shell === activeShell) : [];
-    const cnt = (kind) => base.filter(s =>
-      kind === 'all' ? true : kind === 'active' ? s.status !== 'idle' : s.status === 'idle').length;
-    const mk = (id, label) => {
-      const b = document.createElement('button');
-      b.className = 'stab sub' + (activeStatus === id ? ' on' : '');
-      b.innerHTML = label + '<span class="stab-count">(' + cnt(id) + ')</span>';
-      b.addEventListener('click', () => { activeStatus = id; renderSessions(dashState); });
-      return b;
-    };
-    bar.appendChild(mk('all', 'All'));
-    bar.appendChild(mk('active', 'Active'));
-    bar.appendChild(mk('idle', 'Idle'));
-  }
-
   function visibleSessions() {
     let list = dashState ? dashState.sessions : [];
     if (activeShell !== 'all') list = list.filter(s => s.shell === activeShell);
@@ -860,6 +939,7 @@ INDEX_HTML = """<!doctype html>
     return list;
   }
 
+  // Full-width tap-to-connect cards with a separate close target.
   function renderRows() {
     const list = document.getElementById('sesslist');
     list.innerHTML = '';
@@ -871,28 +951,38 @@ INDEX_HTML = """<!doctype html>
       return;
     }
     for (const s of rows) {
-      const row = document.createElement('div');
-      row.className = 'srow';
-      row.title = 'Connect to ' + s.name;
+      const card = document.createElement('div');
+      card.className = 'scard';
+      card.title = 'Connect to ' + s.name;
 
       const dot = document.createElement('span');
       dot.className = 'sdot ' + s.status;
-      const name = document.createElement('span');
+
+      const body = document.createElement('div');
+      body.className = 'sbody';
+      const name = document.createElement('div');
       name.className = 'sname'; name.textContent = s.name;
-      row.appendChild(dot); row.appendChild(name);
       if (agentMap[s.shell]) {
         const badge = document.createElement('span');
         badge.className = 'sagent'; badge.textContent = 'AGENT';
-        row.appendChild(badge);
+        name.appendChild(badge);
       }
+      body.appendChild(name);
+
+      const meta = document.createElement('div');
+      meta.className = 'smeta';
       const stt = document.createElement('span');
       stt.className = 'sstatus ' + s.status; stt.textContent = s.status;
+      meta.appendChild(stt);
       const cr = document.createElement('span');
       cr.className = 'screated';
       cr.textContent = new Date(s.created * 1000).toLocaleTimeString();
+      meta.appendChild(cr);
+      body.appendChild(meta);
 
       const close = document.createElement('button');
-      close.className = 'sclose'; close.textContent = '×';
+      close.className = 'sclose'; close.textContent = '\u00d7';
+      close.setAttribute('aria-label', 'Close session ' + s.name);
       close.addEventListener('click', (e) => {
         e.stopPropagation();
         if (dashWs && dashWs.readyState === 1) {
@@ -900,10 +990,11 @@ INDEX_HTML = """<!doctype html>
         }
       });
 
-      row.addEventListener('click', () => openTerminal(s.id, s.name));
-      row.appendChild(stt);
-      row.appendChild(cr); row.appendChild(close);
-      list.appendChild(row);
+      card.appendChild(dot);
+      card.appendChild(body);
+      card.appendChild(close);
+      card.addEventListener('click', () => openTerminal(s.id, s.name));
+      list.appendChild(card);
     }
   }
 
@@ -924,8 +1015,10 @@ INDEX_HTML = """<!doctype html>
     const sel = document.getElementById('newshell');
     const cwd = document.getElementById('newcwd');
     const isAgent = !!agentMap[sel.value];
-    cwd.classList.toggle('on', isAgent);
+    cwd.disabled = !isAgent;
+    cwd.placeholder = isAgent ? (agentDefaultCwd || '~') + ' (agent default)' : 'not used for shells';
     if (isAgent && !cwd.value) cwd.value = agentDefaultCwd;
+    if (!isAgent) cwd.value = '';
   }
   document.getElementById('newshell').addEventListener('change', showCwdField);
 
@@ -940,6 +1033,7 @@ INDEX_HTML = """<!doctype html>
       opened = true;
       document.getElementById('gate').style.display = 'none';
       document.getElementById('dash').style.display = 'flex';
+      document.getElementById('fab').classList.add('on');
     };
     dashWs.onmessage = (ev) => {
       const d = ev.data;
@@ -948,11 +1042,7 @@ INDEX_HTML = """<!doctype html>
         const obj = JSON.parse(d);
         if (obj.type === 'claimed') { showClaimed(obj); return; }
         if (obj.type === 'dashboard') { renderSessions(obj); return; }
-        if (obj.type === 'error') {
-          const msg = document.getElementById('dashmsg');
-          if (msg) msg.textContent = obj.message || 'error';
-          return;
-        }
+        if (obj.type === 'error') { showToast(obj.message || 'error'); return; }
       } catch (e) {}
     };
     dashWs.onclose = () => { if (!opened) gateerr.textContent = 'Wrong code. Try again.'; };
@@ -961,16 +1051,17 @@ INDEX_HTML = """<!doctype html>
 
   function openTerminal(sid, name) {
     if (!xtermOk) {
-      const msg = document.getElementById('dashmsg');
-      if (msg) msg.textContent = 'Terminal library unavailable (CDN blocked) \u2014 cannot attach.';
+      showToast('Terminal library unavailable (CDN blocked) \u2014 cannot attach.');
       return;
     }
+    closeSheet();
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
     const termDiv = document.getElementById('terminal');
     document.getElementById('dash').style.display = 'none';
     document.getElementById('app').style.display = 'flex';
     document.getElementById('term-tag').textContent = name + ' (' + sid + ')';
     document.getElementById('backbar').style.display = 'flex';
+    document.getElementById('fab').classList.remove('on');
     termDiv.style.display = 'block';
     termDiv.innerHTML = '';
 
@@ -1019,9 +1110,35 @@ INDEX_HTML = """<!doctype html>
     document.getElementById('backbar').style.display = 'none';
     document.getElementById('app').style.display = 'none';
     document.getElementById('dash').style.display = 'flex';
+    document.getElementById('fab').classList.add('on');
     if (dashWs && dashWs.readyState === 1) {
       dashWs.send(JSON.stringify({type:'list'}));
     }
+  }
+
+  // ---- Bottom sheet (New session) ----
+  function openSheet() {
+    const wrap = document.getElementById('sheetwrap');
+    wrap.classList.add('on');
+    showCwdField();
+    document.getElementById('newshell').focus();
+  }
+  function closeSheet() {
+    document.getElementById('sheetwrap').classList.remove('on');
+  }
+  document.getElementById('fab').addEventListener('click', openSheet);
+  document.getElementById('scrim').addEventListener('click', closeSheet);
+  document.getElementById('sheetclose').addEventListener('click', closeSheet);
+
+  // Keyboard: keep the sheet inside the visible viewport while typing.
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', () => {
+      const wrap = document.getElementById('sheetwrap');
+      if (!wrap.classList.contains('on')) return;
+      wrap.style.height = window.visualViewport.height + 'px';
+      const el = document.querySelector('.sheet input:focus, .sheet select:focus');
+      if (el) el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    });
   }
 
   window.addEventListener('resize', () => {
@@ -1037,15 +1154,14 @@ INDEX_HTML = """<!doctype html>
     const sel = document.getElementById('newshell');
     const shell = sel.value ? sel.value : '';
     const cwdIn = document.getElementById('newcwd');
-    const cwd = cwdIn.classList.contains('on') ? cwdIn.value.trim() : '';
-    const msg = document.getElementById('dashmsg');
-    if (msg) msg.textContent = '';
+    const cwd = agentMap[shell] ? cwdIn.value.trim() : '';
     if (agentMap[shell] && !confirm(
         'Agent sessions run with your local machine credentials and API keys.\\n' +
         'Start ' + agentMap[shell].name + (cwd ? ' in ' + cwd : '') + '?')) {
       return;
     }
     dashWs.send(JSON.stringify({type:'create', shell, cwd}));
+    closeSheet();
   });
   document.getElementById('rescanbtn').addEventListener('click', () => {
     const btn = document.getElementById('rescanbtn');
@@ -1054,6 +1170,10 @@ INDEX_HTML = """<!doctype html>
       btn.disabled = false;
       loadShells();
     }).catch(() => { btn.disabled = false; });
+  });
+  document.getElementById('secbanner-x').addEventListener('click', () => {
+    document.getElementById('secbanner').style.display = 'none';
+    sessionStorage.setItem('secbanner-dismissed', '1');
   });
   document.getElementById('go').addEventListener('click', connect);
   codeInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') connect(); });

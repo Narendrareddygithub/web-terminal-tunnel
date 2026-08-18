@@ -147,7 +147,7 @@ Three components:
 
 ### 3.6 npm launcher (`wtt-web`)
 
-- Published as **`wtt-web@1.2.3`** on the npm registry.
+- Published as **`wtt-web@1.3.0`** on the npm registry.
 - `package.json`: `bin: {"wtt-web": "bin/wtt.js"}`, `files` whitelist ships
   `bin/`, `Start-WebTerminal.ps1`, `terminal_server.py`, `requirements.txt`,
   `README.md`, `LICENSE`. `engines: node>=18`, `os: ["win32"]`. No runtime deps.
@@ -301,7 +301,7 @@ After any wrapper change, verify before publishing:
 
 ```powershell
 npm pack                       # produce the tarball
-npm i -g ./wtt-web-1.2.3.tgz   # install from the tarball
+npm i -g ./wtt-web-1.3.0.tgz   # install from the tarball
 wtt-web -Shell cmd             # run + Ctrl+C teardown check
 ```
 
