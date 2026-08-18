@@ -395,30 +395,43 @@ INDEX_HTML = """<!doctype html>
   }
   #dash .dash-head .title { font-size:16px; color:#eee; }
   #dash .dash-head .countdown { font-size:13px; opacity:0.8; margin-left:auto; }
+  #shelltabs, #subtabs {
+    display:flex; flex-wrap:wrap; gap:6px; align-items:center;
+    padding:8px 14px 0; font-family:Consolas, monospace;
+  }
+  #subtabs { padding-bottom:6px; border-bottom:1px solid #333; }
+  .stab {
+    font-family:Consolas, monospace; font-size:13px; padding:5px 12px;
+    background:#252526; color:#bbb; border:1px solid #333; border-radius:999px; cursor:pointer;
+  }
+  .stab:hover { border-color:#555; color:#eee; }
+  .stab.on { background:#2d6cdf; color:#fff; border-color:#2d6cdf; }
+  .stab .stab-count { opacity:0.75; margin-left:5px; font-size:11px; }
+  .stab.sub { font-size:12px; padding:4px 10px; }
   #sesslist { flex:1; overflow-y:auto; padding:10px 14px; font-family:Consolas, monospace; }
-  #pills { display:flex; flex-wrap:wrap; gap:10px; }
-  .pill {
-    display:flex; align-items:center; gap:8px;
-    padding:8px 14px; background:#252526;
-    border:1px solid #333; border-radius:999px; cursor:pointer;
-    font-family:Consolas, monospace; font-size:14px; color:#eee;
-    user-select:none;
+  .srow {
+    display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+    padding:9px 12px; margin-bottom:6px; background:#252526;
+    border:1px solid #333; border-radius:8px; cursor:pointer;
   }
-  .pill:hover { border-color:#555; background:#2d2d30; }
-  .pill.attached { border-color:#2d6cdf; background:#1f3553; }
-  .pill .pill-dot { width:10px; height:10px; border-radius:50%; flex:0 0 auto; }
-  .pill-dot.idle { background:#888; }
-  .pill-dot.running { background:#4ec9b0; }
-  .pill-dot.attached { background:#2d6cdf; }
-  .pill .pill-shell {
-    font-size:11px; color:#9cdcfe; background:#1e1e1e; padding:1px 8px; border-radius:999px;
+  .srow:hover { border-color:#555; background:#2d2d30; }
+  .srow .sdot { width:10px; height:10px; border-radius:50%; flex:0 0 auto; }
+  .sdot.idle { background:#888; }
+  .sdot.running { background:#4ec9b0; }
+  .sdot.attached { background:#2d6cdf; }
+  .srow .sname { font-size:14px; color:#eee; }
+  .srow .sstatus {
+    font-size:12px; padding:1px 8px; border-radius:999px;
+    text-transform:capitalize; color:#bbb; background:#333;
   }
-  .pill .pill-created { font-size:11px; color:#888; }
-  .pill .pill-close {
-    margin-left:4px; background:none; border:none; color:#888; cursor:pointer;
-    font-size:16px; line-height:1; padding:2px 4px; border-radius:50%;
+  .srow .sstatus.running, .srow .sstatus.attached { color:#4ec9b0; background:#1f3b33; }
+  .srow .screated { font-size:11px; color:#888; margin-left:auto; }
+  .srow .sclose {
+    background:none; border:none; color:#888; cursor:pointer;
+    font-size:16px; line-height:1; padding:2px 6px; border-radius:50%;
   }
-  .pill .pill-close:hover { color:#f88; background:#3a3a3a; }
+  .srow .sclose:hover { color:#f88; background:#3a3a3a; }
+  #empty { color:#666; font-size:13px; padding:14px; }
   #active-count { font-size:12px; color:#4ec9b0; background:#1f3b33; padding:3px 10px; border-radius:999px; }
   #dash .dash-new {
     display:flex; gap:8px; align-items:center; flex-wrap:wrap;
@@ -503,6 +516,8 @@ INDEX_HTML = """<!doctype html>
     <span id="active-count"></span>
     <span class="countdown" id="dash-left"></span>
   </div>
+  <div id="shelltabs"></div>
+  <div id="subtabs"></div>
   <div id="sesslist"></div>
   <div class="dash-new">
     <span>New session:</span>
@@ -548,16 +563,22 @@ INDEX_HTML = """<!doctype html>
   let term = null;
   let fitAddon = null;
   let countTimer = null;
+  let shellMap = {};    // shell id -> display name
+  let dashState = null; // last dashboard payload
+  let activeShell = 'all';
+  let activeStatus = 'all';
 
   const codeInput = document.getElementById('code');
   codeInput.addEventListener('input', () => {
     codeInput.value = codeInput.value.replace(/[^0-9]/g, '').slice(0, 2);
   });
 
-  // Populate the New-session shell dropdown.
+  // Populate the New-session shell dropdown + shell tab map.
   fetch('/shells').then(r => r.json()).then(data => {
+    shellMap = {};
     const sel = document.getElementById('newshell');
     for (const s of data.available) {
+      shellMap[s.id] = s.name;
       const o = document.createElement('option');
       o.value = s.id; o.textContent = s.name;
       if (s.id === data.default) o.selected = true;
@@ -566,6 +587,7 @@ INDEX_HTML = """<!doctype html>
     if (!data.choice_allowed) {
       document.getElementById('addhint').textContent = '(shell fixed by owner)';
     }
+    if (dashState) renderSessions(dashState);
   }).catch(() => {});
 
   function decodeSeq(s) {
@@ -598,40 +620,10 @@ INDEX_HTML = """<!doctype html>
   }
 
   function renderSessions(st) {
-    const list = document.getElementById('sesslist');
-    list.innerHTML = '';
-    const pills = document.createElement('div');
-    pills.id = 'pills';
-    for (const s of st.sessions) {
-      const pill = document.createElement('div');
-      pill.className = 'pill' + (s.status === 'attached' ? ' attached' : '');
-      pill.title = 'Connect to ' + s.name;
-
-      const dot = document.createElement('span');
-      dot.className = 'pill-dot ' + s.status;
-      const name = document.createElement('span');
-      name.className = 'pill-name'; name.textContent = s.name;
-      const sh = document.createElement('span');
-      sh.className = 'pill-shell'; sh.textContent = s.shell;
-      const cr = document.createElement('span');
-      cr.className = 'pill-created';
-      cr.textContent = new Date(s.created * 1000).toLocaleTimeString();
-
-      const close = document.createElement('button');
-      close.className = 'pill-close'; close.textContent = '×';
-      close.addEventListener('click', (e) => {
-        e.stopPropagation();
-        if (dashWs && dashWs.readyState === 1) {
-          dashWs.send(JSON.stringify({type:'close', id:s.id}));
-        }
-      });
-
-      pill.addEventListener('click', () => openTerminal(s.id, s.name));
-      pill.appendChild(dot); pill.appendChild(name); pill.appendChild(sh);
-      pill.appendChild(cr); pill.appendChild(close);
-      pills.appendChild(pill);
-    }
-    list.appendChild(pills);
+    dashState = st;
+    renderShellTabs();
+    renderSubTabs();
+    renderRows();
 
     document.getElementById('active-count').textContent =
       st.sessions.length + ' session' + (st.sessions.length === 1 ? '' : 's');
@@ -645,6 +637,108 @@ INDEX_HTML = """<!doctype html>
       left.textContent = fmtCountdown(rem);
       clearInterval(countTimer);
       countTimer = setInterval(tick, 1000);
+    }
+  }
+
+  function shellTabIds() {
+    const ids = Object.keys(shellMap);
+    if (ids.length > 0) return ids;
+    // /shells not loaded yet: derive tabs from sessions present.
+    const seen = {};
+    (dashState ? dashState.sessions : []).forEach(s => { seen[s.shell] = true; });
+    return Object.keys(seen);
+  }
+
+  function renderShellTabs() {
+    const bar = document.getElementById('shelltabs');
+    bar.innerHTML = '';
+    const mk = (id, label) => {
+      const b = document.createElement('button');
+      b.className = 'stab' + (activeShell === id ? ' on' : '');
+      const count = dashState ? dashState.sessions.filter(s => id === 'all' || s.shell === id).length : 0;
+      b.innerHTML = label + '<span class="stab-count">(' + count + ')</span>';
+      b.addEventListener('click', () => {
+        activeShell = id;
+        syncShellSelect();
+        renderSessions(dashState);
+      });
+      return b;
+    };
+    bar.appendChild(mk('all', 'All'));
+    for (const id of shellTabIds()) bar.appendChild(mk(id, shellMap[id] || id));
+  }
+
+  function renderSubTabs() {
+    const bar = document.getElementById('subtabs');
+    bar.innerHTML = '';
+    const base = dashState ? dashState.sessions.filter(s => activeShell === 'all' || s.shell === activeShell) : [];
+    const cnt = (kind) => base.filter(s =>
+      kind === 'all' ? true : kind === 'active' ? s.status !== 'idle' : s.status === 'idle').length;
+    const mk = (id, label) => {
+      const b = document.createElement('button');
+      b.className = 'stab sub' + (activeStatus === id ? ' on' : '');
+      b.innerHTML = label + '<span class="stab-count">(' + cnt(id) + ')</span>';
+      b.addEventListener('click', () => { activeStatus = id; renderSessions(dashState); });
+      return b;
+    };
+    bar.appendChild(mk('all', 'All'));
+    bar.appendChild(mk('active', 'Active'));
+    bar.appendChild(mk('idle', 'Idle'));
+  }
+
+  function visibleSessions() {
+    let list = dashState ? dashState.sessions : [];
+    if (activeShell !== 'all') list = list.filter(s => s.shell === activeShell);
+    if (activeStatus === 'active') list = list.filter(s => s.status !== 'idle');
+    else if (activeStatus === 'idle') list = list.filter(s => s.status === 'idle');
+    return list;
+  }
+
+  function renderRows() {
+    const list = document.getElementById('sesslist');
+    list.innerHTML = '';
+    const rows = visibleSessions();
+    if (rows.length === 0) {
+      const e = document.createElement('div');
+      e.id = 'empty'; e.textContent = 'No sessions here.';
+      list.appendChild(e);
+      return;
+    }
+    for (const s of rows) {
+      const row = document.createElement('div');
+      row.className = 'srow';
+      row.title = 'Connect to ' + s.name;
+
+      const dot = document.createElement('span');
+      dot.className = 'sdot ' + s.status;
+      const name = document.createElement('span');
+      name.className = 'sname'; name.textContent = s.name;
+      const stt = document.createElement('span');
+      stt.className = 'sstatus ' + s.status; stt.textContent = s.status;
+      const cr = document.createElement('span');
+      cr.className = 'screated';
+      cr.textContent = new Date(s.created * 1000).toLocaleTimeString();
+
+      const close = document.createElement('button');
+      close.className = 'sclose'; close.textContent = '×';
+      close.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (dashWs && dashWs.readyState === 1) {
+          dashWs.send(JSON.stringify({type:'close', id:s.id}));
+        }
+      });
+
+      row.addEventListener('click', () => openTerminal(s.id, s.name));
+      row.appendChild(dot); row.appendChild(name); row.appendChild(stt);
+      row.appendChild(cr); row.appendChild(close);
+      list.appendChild(row);
+    }
+  }
+
+  function syncShellSelect() {
+    const sel = document.getElementById('newshell');
+    if (activeShell !== 'all' && sel.querySelector('option[value="' + activeShell + '"]')) {
+      sel.value = activeShell;
     }
   }
 

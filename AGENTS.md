@@ -25,7 +25,7 @@ npm i -g wtt-web
 wtt-web -Shell cmd -ShellChoice -Sessions 3
 ```
 
-Publishing to npm: `npm login` then `npm publish` (2FA/OTP or a granular bypass token required). Never commit `.npmrc` — gitignored. After a wrapper change: `npm pack` → `npm i -g ./wtt-web-1.1.1.tgz` → run + Ctrl+C teardown check before publishing.
+Publishing to npm: `npm login` then `npm publish` (2FA/OTP or a granular bypass token required). Never commit `.npmrc` — gitignored. After a wrapper change: `npm pack` → `npm i -g ./wtt-web-1.1.2.tgz` → run + Ctrl+C teardown check before publishing.
 
 Expect output: tunnel URL (`https://<random>.trycloudflare.com`), 2-digit code, ASCII QR. Ctrl+C tears down server + tunnel.
 
