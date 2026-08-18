@@ -366,7 +366,11 @@ INDEX_HTML = """<!doctype html>
   html, body { margin:0; padding:0; background:#1e1e1e; height:100%; overflow:hidden; }
   #app { height:100vh; display:none; flex-direction:column; }
   #terminal { flex:1; min-height:0; padding:4px; }
-  #loaderr { color:#f55; font-family:monospace; padding:12px; white-space:pre-wrap; }
+  #loaderr {
+    position:fixed; top:0; left:0; right:0; z-index:50;
+    color:#ffd9d9; font-family:monospace; font-size:13px;
+    padding:10px 14px; background:#7a1f1f; border-bottom:1px solid #a33;
+  }
 
   #gate {
     height:100vh; display:flex; flex-direction:column; align-items:center; justify-content:center;
@@ -626,10 +630,10 @@ INDEX_HTML = """<!doctype html>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
 <script>
-  if (typeof Terminal === 'undefined' || typeof FitAddon === 'undefined') {
+  const xtermOk = (typeof Terminal !== 'undefined' && typeof FitAddon !== 'undefined');
+  if (!xtermOk) {
     document.getElementById('loaderr').textContent =
-      'Failed to load terminal library from CDN. Check your internet connection and try reloading.';
-    throw new Error('xterm.js failed to load');
+      'Terminal library failed to load from CDN. Code entry, sessions and management still work; attaching is disabled.';
   }
 
   let code = '';
@@ -955,6 +959,11 @@ INDEX_HTML = """<!doctype html>
   }
 
   function openTerminal(sid, name) {
+    if (!xtermOk) {
+      const msg = document.getElementById('dashmsg');
+      if (msg) msg.textContent = 'Terminal library unavailable (CDN blocked) \u2014 cannot attach.';
+      return;
+    }
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
     const termDiv = document.getElementById('terminal');
     document.getElementById('dash').style.display = 'none';
