@@ -367,7 +367,8 @@ INDEX_HTML = """<!doctype html>
   #app { height:100vh; display:none; flex-direction:column; }
   #terminal { flex:1; min-height:0; padding:4px; }
   #loaderr {
-    position:fixed; top:0; left:0; right:0; z-index:50;
+    position:fixed; bottom:0; left:0; right:0; z-index:50;
+    pointer-events:none;
     color:#ffd9d9; font-family:monospace; font-size:13px;
     padding:10px 14px; background:#7a1f1f; border-bottom:1px solid #a33;
   }
