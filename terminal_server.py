@@ -396,18 +396,36 @@ INDEX_HTML = """<!doctype html>
   #dash .dash-head .title { font-size:16px; color:#eee; }
   #dash .dash-head .countdown { font-size:13px; opacity:0.8; margin-left:auto; }
   #shelltabs, #subtabs {
-    display:flex; flex-wrap:wrap; gap:6px; align-items:center;
+    display:flex; flex-wrap:wrap; align-items:center;
     padding:8px 14px 0; font-family:Consolas, monospace;
   }
-  #subtabs { padding-bottom:6px; border-bottom:1px solid #333; }
+  /* shell row: VS Code boxed editor tabs */
+  #shelltabs { gap:2px; background:#2d2d30; padding:4px 14px 0; }
   .stab {
-    font-family:Consolas, monospace; font-size:13px; padding:5px 12px;
-    background:#252526; color:#bbb; border:1px solid #333; border-radius:999px; cursor:pointer;
+    font-family:Consolas, monospace; font-size:13px;
+    padding:6px 14px; background:#252526; color:#bbb;
+    border:1px solid #2a2a2a; border-bottom:none;
+    border-radius:4px 4px 0 0; cursor:pointer; position:relative;
   }
-  .stab:hover { border-color:#555; color:#eee; }
-  .stab.on { background:#2d6cdf; color:#fff; border-color:#2d6cdf; }
+  .stab:hover { color:#eee; background:#2d2d30; }
+  .stab.on { background:#1e1e1e; color:#eee; }
+  .stab.on::before {
+    content:''; position:absolute; top:-1px; left:-1px; right:-1px; height:2px;
+    background:#2d6cdf; border-radius:4px 4px 0 0;
+  }
   .stab .stab-count { opacity:0.75; margin-left:5px; font-size:11px; }
-  .stab.sub { font-size:12px; padding:4px 10px; }
+  /* status row: segmented control */
+  #subtabs {
+    gap:0; margin:8px 14px; padding:0; align-self:flex-start;
+    border:1px solid #333; border-radius:6px; overflow:hidden;
+  }
+  .stab.sub {
+    font-size:12px; padding:5px 12px; border:none; border-radius:0;
+    background:#252526; color:#bbb;
+  }
+  .stab.sub + .stab.sub { border-left:1px solid #333; }
+  .stab.sub:hover { background:#2d2d30; }
+  .stab.sub.on { background:#2d6cdf; color:#fff; }
   #sesslist { flex:1; overflow-y:auto; padding:10px 14px; font-family:Consolas, monospace; }
   .srow {
     display:flex; align-items:center; gap:10px; flex-wrap:wrap;
