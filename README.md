@@ -63,12 +63,15 @@ You'll see something like:
 ```
 
 Open the URL on any device, enter the code, and you get a dashboard of the
-active sessions. Connect to one (or click "New session" and add another, with
+active sessions. Connect to one (or tap the **+** button and add another, with
 `-ShellChoice` letting you pick any installed shell: PowerShell, pwsh, cmd,
 Git Bash, WSL). Sessions keep running while you're away — close the browser tab
-and the shell survives until you close it from the dashboard. On a phone, a
-small toolbar appears with Esc / Tab / Ctrl+C / Ctrl+D / Ctrl+Z / Ctrl+L /
-arrow keys, since mobile keyboards can't send those directly.
+and the shell survives until you close it from the dashboard. The UI is
+mobile-first: a horizontally scrollable filter rail (status / shell / agent
+chips), full-width tap-to-connect session cards, and a bottom-sheet form for
+new sessions — works from a 360px phone screen up to a desktop browser. On a
+phone, a small toolbar appears with Esc / Tab / Ctrl+C / Ctrl+D / Ctrl+Z /
+Ctrl+L / arrow keys, since mobile keyboards can't send those directly.
 
 Press **Ctrl+C** in the PowerShell window to shut everything down — the tunnel and the
 access code both die with it.
@@ -111,6 +114,13 @@ access code both die with it.
       sessions; the owner's dashboard lists them with create / close / connect;
       sessions persist across disconnects, `-ShellChoice` picks the shell when
       creating)
+
+- [x] Mobile-first responsive UI (done, shipped `wtt-web@1.3.0` — chip-rail
+      filters, tap-to-connect session cards, FAB + bottom-sheet new-session
+      form, 44px+ touch targets, safe-area insets, dark theme)
+
+- [ ] Push notification to WhatsApp, Telegram or other messaging platforms.
+
 
 Have an idea, found a bug, or want a feature? Please open an
 [Issue](../../issues) or start a [Discussion](../../discussions) — feedback from anyone
