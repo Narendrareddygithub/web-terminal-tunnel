@@ -13,6 +13,7 @@
     "Start-WebTerminal.ps1",
     "terminal_server.py",
     "agents.py",
+    "processes.py",
     "requirements.txt",
     "README.md",
     "LICENSE"

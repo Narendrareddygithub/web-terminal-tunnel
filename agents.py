@@ -218,6 +218,19 @@ def find_bin(aid):
     return None
 
 
+def known_stems():
+    """Map lowercased agent bin stems (no .exe) to agent ids, for matching
+    currently-running local processes (processes.py). Stems shorter than 3
+    chars are skipped so "hf" doesn't match random paths."""
+    out = {}
+    for aid, spec in _SPECS.items():
+        for b in spec["bins"]:
+            stem = b.lower().replace(".exe", "")
+            if len(stem) >= 3:
+                out[stem] = aid
+    return out
+
+
 def spec_env(aid):
     spec = _SPECS.get(aid) or {}
     return dict(spec.get("extra_env", {}))

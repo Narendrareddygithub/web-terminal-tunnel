@@ -39,6 +39,7 @@ import asyncio
 import itertools
 import json
 import os
+import re
 import secrets
 import shutil
 import sys
@@ -48,10 +49,11 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 import uvicorn
 
 import agents
+import processes
 
 try:
     from winpty import PtyProcess
@@ -182,6 +184,7 @@ def _make_session(shell_id, cwd=None):
         "ws": None,          # currently attached websocket (one per session)
         "reader_stop": None, # threading.Event for the reader thread
         "loop": None,        # asyncio loop the reader thread sends on
+        "tail": "",         # bounded output tail for dashboard preview
     }
 
 
@@ -274,6 +277,7 @@ def _session_info(sess) -> dict:
         "shell": sess["shell_id"],
         "status": _session_status(sess),
         "created": sess["created_wall"],
+        "cwd": sess.get("cwd"),
     }
 
 
@@ -462,23 +466,31 @@ INDEX_HTML = """<!doctype html>
   }
   .secbanner button:active { color:var(--warn); background:var(--surface); }
 
-  /* filter chip rail: horizontal scroll-snap carousel */
-  #chiprail {
-    display:flex; align-items:center; gap:8px; overflow-x:auto;
-    padding:10px 16px; scroll-snap-type:x mandatory; -webkit-overflow-scrolling:touch;
-    scrollbar-width:none;
+  /* dashboard tabs: Agents | Shells */
+  #dashtabs {
+    display:flex; gap:8px; padding:10px 16px 0;
+    max-width:900px; width:100%; margin:0 auto;
   }
-  #chiprail::-webkit-scrollbar { display:none; }
+  #dashtabs button {
+    flex:1; min-height:var(--touch); border-radius:10px;
+    border:1px solid var(--border); background:var(--surface);
+    color:var(--muted); font-size:14px; font-weight:600; cursor:pointer;
+  }
+  #dashtabs button.on { background:var(--accent); border-color:var(--accent); color:#fff; }
+
+  /* filter chip rail: 3 static status chips */
+  #chiprail {
+    display:flex; align-items:center; flex-wrap:wrap; gap:8px;
+    padding:10px 16px; max-width:900px; width:100%; margin:0 auto;
+  }
   .chip {
     flex:0 0 auto; min-height:var(--touch); padding:10px 16px;
     border-radius:999px; border:1px solid var(--border); background:var(--surface);
     color:var(--muted); font-size:14px; cursor:pointer; white-space:nowrap;
-    scroll-snap-align:start;
   }
   .chip:active { background:var(--surface2); }
   .chip.on { background:var(--accent); border-color:var(--accent); color:#fff; }
   .chip .cnt { opacity:0.8; margin-left:6px; }
-  .railsep { flex:0 0 auto; color:var(--border); font-size:14px; padding:0 2px; user-select:none; }
 
   /* session cards: full-width tap-to-connect */
   #sesslist { flex:1; overflow-y:auto; padding:12px 16px; display:flex; flex-direction:column; gap:10px; }
@@ -498,16 +510,33 @@ INDEX_HTML = """<!doctype html>
     font-size:10px; padding:2px 8px; border-radius:999px;
     background:var(--agentbg); color:var(--agent); border:1px solid #5b3a9e; font-weight:normal;
   }
+  .scard .slocal {
+    font-size:10px; padding:2px 8px; border-radius:999px;
+    background:#1d3a4d; color:#6ec3e8; border:1px solid #2a5a75; font-weight:normal;
+  }
   .scard .smeta { font-size:12px; color:var(--muted); margin-top:3px; display:flex; align-items:center; gap:8px; }
   .sstatus { font-size:11px; padding:3px 10px; border-radius:999px; text-transform:capitalize; color:var(--muted); background:#333; }
   .sstatus.running { color:var(--ok); background:var(--okbg); }
   .sstatus.attached { color:var(--accent2); background:#1d2c4d; }
   .scard .screated { color:var(--muted); }
+  .scard .scwd { font-family:Consolas, monospace; color:var(--muted); }
+  .scard .stail {
+    font-family:Consolas, monospace; font-size:11px; line-height:1.35;
+    color:#9cdcfe; background:#111; border:1px solid #222;
+    border-radius:6px; padding:6px 8px; margin-top:6px;
+    white-space:pre-wrap; word-break:break-all; max-height:96px; overflow:hidden;
+  }
   .scard .sclose {
     flex:0 0 auto; width:var(--touch); height:var(--touch); border-radius:50%;
     background:none; border:none; color:var(--muted); font-size:22px; line-height:1; cursor:pointer;
   }
   .scard .sclose:active { color:var(--danger); background:var(--surface); }
+  .sctrl {
+    flex:0 0 auto; min-height:var(--touch); padding:8px 16px;
+    border-radius:8px; background:var(--accent); color:#fff;
+    border:none; font-size:13px; cursor:pointer; white-space:nowrap;
+  }
+  .sctrl:active { background:var(--accent2); }
   #empty { color:var(--muted); font-size:13px; padding:20px 14px; text-align:center; }
 
   /* toast (errors / notices) */
@@ -554,6 +583,45 @@ INDEX_HTML = """<!doctype html>
   }
   .field select:focus, .field input:focus { border-color:var(--accent); outline:none; }
   .field input[disabled] { opacity:0.45; }
+  /* create-sheet tabs + item list + folder browser */
+  .stabbar { display:flex; gap:8px; margin-bottom:12px; }
+  .stabbar button {
+    flex:1; min-height:44px; border-radius:10px;
+    border:1px solid var(--border); background:var(--bg); color:var(--muted);
+    font-size:14px; font-weight:600; cursor:pointer;
+  }
+  .stabbar button.on { background:var(--accent); border-color:var(--accent); color:#fff; }
+  #itemlist { max-height:32vh; overflow-y:auto; display:flex; flex-direction:column; gap:6px; margin-bottom:14px; }
+  .irow {
+    display:flex; align-items:center; justify-content:space-between; gap:8px;
+    width:100%; min-height:44px; padding:8px 12px; text-align:left;
+    background:var(--bg); border:1px solid var(--border); border-radius:10px;
+    color:var(--text); font-size:14px; cursor:pointer;
+  }
+  .irow.on { border-color:var(--accent); background:var(--accent2); }
+  .irow.dis { opacity:0.45; cursor:not-allowed; }
+  .irow .dnl { font-size:11px; color:var(--warn); white-space:nowrap; }
+  .inote { color:var(--muted); font-size:13px; padding:10px 4px; }
+  .cwdrow { display:flex; gap:8px; }
+  .cwdrow input { flex:1; min-width:0; }
+  .cwdrow .iconbtn {
+    flex:0 0 auto; width:48px; min-height:48px; border-radius:10px;
+    background:var(--surface); border:1px solid var(--border); color:var(--text);
+    font-size:16px; cursor:pointer;
+  }
+  #foldlist {
+    margin-top:8px; max-height:24vh; overflow-y:auto;
+    display:flex; flex-direction:column; gap:4px;
+    background:var(--bg); border:1px solid var(--border); border-radius:10px; padding:6px;
+  }
+  .frow {
+    padding:8px 10px; border-radius:8px; color:var(--text);
+    font-family:Consolas, monospace; font-size:13px; cursor:pointer; white-space:nowrap;
+    overflow:hidden; text-overflow:ellipsis;
+  }
+  .frow:active { background:var(--surface2); }
+  .frow.up { color:var(--muted); }
+  #foldempty { color:var(--muted); font-size:12px; padding:8px 10px; }
   #addbtn {
     width:100%; min-height:52px; border-radius:12px; border:none; cursor:pointer;
     background:var(--accent); color:#fff; font-size:16px; font-weight:600;
@@ -605,6 +673,7 @@ INDEX_HTML = """<!doctype html>
       padding-right:max(16px, calc((100% - 900px)/2 + 16px));
     }
     #chiprail { max-width:900px; width:100%; margin:0 auto; }
+    .sheet { max-width:480px; margin:0 auto; }
     #sesslist {
       max-width:900px; width:100%; margin:0 auto;
       display:grid; grid-template-columns:repeat(2, 1fr); align-content:start;
@@ -652,6 +721,7 @@ INDEX_HTML = """<!doctype html>
     <span>Agent sessions run with your local machine credentials and API keys.</span>
     <button id="secbanner-x" aria-label="Dismiss notice">&times;</button>
   </div>
+  <div id="dashtabs"></div>
   <div id="chiprail"></div>
   <div id="sesslist"></div>
 </div>
@@ -665,13 +735,18 @@ INDEX_HTML = """<!doctype html>
       <span class="stitle">New session</span>
       <button class="iconbtn" id="sheetclose" aria-label="Close">&times;</button>
     </div>
-    <div class="field">
-      <label for="newshell">Agent / Environment</label>
-      <select id="newshell"></select>
+    <div class="stabbar" id="stabbar">
+      <button data-tab="agents" class="stab on">AI Agents</button>
+      <button data-tab="shells" class="stab">Shells</button>
     </div>
+    <div class="itemlist" id="itemlist"></div>
     <div class="field">
-      <label for="newcwd">Working directory <span class="hint" id="addhint"></span></label>
-      <input id="newcwd" placeholder="~ (agent default)" spellcheck="false" autocomplete="off"/>
+      <label for="newcwd">Working directory</label>
+      <div class="cwdrow">
+        <input id="newcwd" spellcheck="false" autocomplete="off"/>
+        <button id="cwdgo" class="iconbtn" title="Go to path">&rarr;</button>
+      </div>
+      <ul id="foldlist"></ul>
     </div>
     <button id="addbtn">Add session</button>
   </div>
@@ -716,12 +791,17 @@ INDEX_HTML = """<!doctype html>
   let toastTimer = null;
   let shellMap = {};    // shell id -> display name
   let dashState = null; // last dashboard payload
-  let activeShell = 'all';
+  let activeTab = 'agents'; // dashboard tab: agents | shells
   let activeStatus = 'all';
   let agentMap = {};    // agent id -> {name, version, tags, launchable, notes}
   let agentIds = [];    // ordered agent ids (launchable first)
   let agentDefaultCwd = '~';
-  let activeAgent = 'all';
+  let localProcs = [];    // external running processes (polled from /processes)
+  let pendingControl = null; // agent id awaiting a freshly created session
+  let tailMap = {};       // session id -> cleaned output tail (polled from /tails)
+  let sheetTab = 'agents'; // create-sheet tab: agents | shells
+  let selItem = { agents: null, shells: null }; // selected item id per sheet tab
+  let curPath = '';       // folder browser current absolute path
 
   const codeInput = document.getElementById('code');
   codeInput.addEventListener('input', () => {
@@ -737,7 +817,7 @@ INDEX_HTML = """<!doctype html>
     toastTimer = setTimeout(() => el.classList.remove('on'), 4000);
   }
 
-  // Populate the New-session dropdown (shells + agents), the chip rail and the
+  // Populate shell/agent registries, the create-sheet lists and the
   // landing-page detected card.
   function loadShells() {
     fetch('/shells').then(r => r.json()).then(data => {
@@ -745,37 +825,21 @@ INDEX_HTML = """<!doctype html>
       agentMap = {};
       agentIds = [];
       agentDefaultCwd = data.agent_default_cwd || '~';
-      const sel = document.getElementById('newshell');
-      sel.innerHTML = '';
-      let og = document.createElement('optgroup');
-      og.label = 'Shells';
-      for (const s of data.available) {
-        shellMap[s.id] = s.name;
-        const o = document.createElement('option');
-        o.value = s.id; o.textContent = s.name;
-        if (s.id === data.default) o.selected = true;
-        og.appendChild(o);
+      for (const s of data.available) shellMap[s.id] = s.name;
+      for (const a of (data.agents || [])) {
+        agentMap[a.id] = a;
+        agentIds.push(a.id);
       }
-      sel.appendChild(og);
-      const ag = data.agents || [];
-      if (ag.length) {
-        og = document.createElement('optgroup');
-        og.label = 'AI Agents';
-        for (const a of ag) {
-          agentMap[a.id] = a;
-          agentIds.push(a.id);
-          const o = document.createElement('option');
-          o.value = a.id;
-          o.textContent = a.name + (a.version ? ' \u00b7 v' + a.version : '');
-          og.appendChild(o);
-        }
-        sel.appendChild(og);
+      // Create-sheet defaults: first launchable agent, owner default shell.
+      const launchable = agentIds.filter(id => agentMap[id].launchable);
+      selItem.agents = launchable[0] || null;
+      selItem.shells = data.available.some(s => s.id === data.default)
+        ? data.default : (data.available[0] && data.available[0].id) || null;
+      renderDetectCard(data.agents || []);
+      if (document.getElementById('sheetwrap').classList.contains('on')) {
+        renderSheetList();
+        loadFolders(defaultCwdFor(selItem[sheetTab]));
       }
-      if (!data.choice_allowed) {
-        document.getElementById('addhint').textContent = '(shell fixed by owner)';
-      }
-      showCwdField();
-      renderDetectCard(ag);
       if (dashState) renderSessions(dashState);
     }).catch(() => {});
   }
@@ -854,14 +918,11 @@ INDEX_HTML = """<!doctype html>
     return b;
   }
 
-  // One horizontally scrollable chip rail: status | shells | agents.
+  // Three static status chips, scoped to the active dashboard tab.
   function renderChipRail() {
     const rail = document.getElementById('chiprail');
     rail.innerHTML = '';
-    const all = dashState ? dashState.sessions : [];
-    const scoped = all.filter(s =>
-      (activeShell === 'all' || s.shell === activeShell) &&
-      (activeAgent === 'all' || s.shell === activeAgent));
+    const scoped = tabScoped();
     const cntStatus = (kind) => scoped.filter(s =>
       kind === 'all' ? true : kind === 'active' ? s.status !== 'idle' : s.status === 'idle').length;
 
@@ -871,43 +932,41 @@ INDEX_HTML = """<!doctype html>
       () => { activeStatus = 'active'; renderSessions(dashState); }));
     rail.appendChild(chip('Idle', cntStatus('idle'), activeStatus === 'idle',
       () => { activeStatus = 'idle'; renderSessions(dashState); }));
+  }
 
-    const shells = shellTabIds();
-    if (shells.length) {
-      const sep = document.createElement('span');
-      sep.className = 'railsep'; sep.textContent = '|';
-      rail.appendChild(sep);
-      for (const id of shells) {
-        const cnt = all.filter(s => s.shell === id).length;
-        rail.appendChild(chip(shellMap[id] || id, cnt, activeShell === id, () => {
-          activeShell = (activeShell === id ? 'all' : id);
-          syncShellSelect();
-          renderSessions(dashState);
-        }));
-      }
-    }
-    if (agentIds.length) {
-      const sep = document.createElement('span');
-      sep.className = 'railsep'; sep.textContent = '|';
-      rail.appendChild(sep);
-      for (const id of agentIds) {
-        const cnt = all.filter(s => s.shell === id).length;
-        rail.appendChild(chip(agentMap[id].name, cnt, activeAgent === id, () => {
-          activeAgent = (activeAgent === id ? 'all' : id);
-          syncShellSelect();
-          renderSessions(dashState);
-        }));
-      }
+  function renderTabs() {
+    const bar = document.getElementById('dashtabs');
+    bar.innerHTML = '';
+    for (const [id, label] of [['agents', 'Agents'], ['shells', 'Shells']]) {
+      const b = document.createElement('button');
+      b.className = activeTab === id ? 'on' : '';
+      b.textContent = label;
+      b.addEventListener('click', () => { activeTab = id; renderSessions(dashState); });
+      bar.appendChild(b);
     }
   }
 
   function renderSessions(st) {
     dashState = st;
+    renderTabs();
     renderChipRail();
     renderRows();
 
+    const hubCount = st.sessions.length;
+    const locCount = localProcs.length;
     document.getElementById('active-count').textContent =
-      st.sessions.length + ' session' + (st.sessions.length === 1 ? '' : 's');
+      hubCount + ' session' + (hubCount === 1 ? '' : 's') +
+      (locCount ? ' \u00b7 ' + locCount + ' local' : '');
+
+    if (pendingControl) {
+      const fresh = st.sessions.filter(s => s.shell === pendingControl);
+      if (fresh.length) {
+        const best = fresh.reduce((a, b) => (a.created > b.created ? a : b));
+        pendingControl = null;
+        openTerminal(best.id, best.name);
+        return;
+      }
+    }
 
     const left = document.getElementById('dash-left');
     if (st.remaining < 0) {
@@ -921,19 +980,33 @@ INDEX_HTML = """<!doctype html>
     }
   }
 
-  function shellTabIds() {
-    const ids = Object.keys(shellMap);
-    if (ids.length > 0) return ids;
-    // /shells not loaded yet: derive tabs from sessions present.
-    const seen = {};
-    (dashState ? dashState.sessions : []).forEach(s => { seen[s.shell] = true; });
-    return Object.keys(seen);
+  // Hub sessions merged with external local processes; external rows are
+  // read-only snapshots (pid suffix, LOCAL badge, always "running").
+  function allRows() {
+    const hub = (dashState ? dashState.sessions : []).map(s => ({local:false, ...s}));
+    const loc = localProcs.map(p => ({
+      id: 'p' + p.pid,
+      name: p.name + ' \u00b7 pid ' + p.pid,
+      shell: p.id,
+      kind: p.kind,
+      status: p.status,
+      created: p.created,
+      local: true
+    }));
+    return hub.concat(loc);
+  }
+
+  function kindOf(s) {
+    if (s.local) return s.kind === 'agent' ? 'agents' : 'shells';
+    return agentMap[s.shell] ? 'agents' : 'shells';
+  }
+
+  function tabScoped() {
+    return allRows().filter(s => kindOf(s) === activeTab);
   }
 
   function visibleSessions() {
-    let list = dashState ? dashState.sessions : [];
-    if (activeShell !== 'all') list = list.filter(s => s.shell === activeShell);
-    if (activeAgent !== 'all') list = list.filter(s => s.shell === activeAgent);
+    let list = tabScoped();
     if (activeStatus === 'active') list = list.filter(s => s.status !== 'idle');
     else if (activeStatus === 'idle') list = list.filter(s => s.status === 'idle');
     return list;
@@ -953,18 +1026,23 @@ INDEX_HTML = """<!doctype html>
     for (const s of rows) {
       const card = document.createElement('div');
       card.className = 'scard';
-      card.title = 'Connect to ' + s.name;
+      card.title = s.local ? s.name + ' (local process, read-only)' : 'Connect to ' + s.name;
 
       const dot = document.createElement('span');
-      dot.className = 'sdot ' + s.status;
+      dot.className = 'sdot ' + (s.local ? 'running' : s.status);
 
       const body = document.createElement('div');
       body.className = 'sbody';
       const name = document.createElement('div');
       name.className = 'sname'; name.textContent = s.name;
-      if (agentMap[s.shell]) {
+      if (agentMap[s.shell] && !s.local) {
         const badge = document.createElement('span');
         badge.className = 'sagent'; badge.textContent = 'AGENT';
+        name.appendChild(badge);
+      }
+      if (s.local) {
+        const badge = document.createElement('span');
+        badge.className = 'slocal'; badge.textContent = 'LOCAL';
         name.appendChild(badge);
       }
       body.appendChild(name);
@@ -972,55 +1050,63 @@ INDEX_HTML = """<!doctype html>
       const meta = document.createElement('div');
       meta.className = 'smeta';
       const stt = document.createElement('span');
-      stt.className = 'sstatus ' + s.status; stt.textContent = s.status;
+      stt.className = 'sstatus ' + (s.local ? 'running' : s.status);
+      stt.textContent = s.status;
       meta.appendChild(stt);
       const cr = document.createElement('span');
       cr.className = 'screated';
-      cr.textContent = new Date(s.created * 1000).toLocaleTimeString();
+      cr.textContent = s.created ? new Date(s.created * 1000).toLocaleTimeString() : '';
       meta.appendChild(cr);
+      if (!s.local && s.cwd) {
+        const cw = document.createElement('span');
+        cw.className = 'scwd';
+        cw.textContent = s.cwd;
+        cw.title = s.cwd;
+        meta.appendChild(cw);
+      }
       body.appendChild(meta);
 
-      const close = document.createElement('button');
-      close.className = 'sclose'; close.textContent = '\u00d7';
-      close.setAttribute('aria-label', 'Close session ' + s.name);
-      close.addEventListener('click', (e) => {
-        e.stopPropagation();
-        if (dashWs && dashWs.readyState === 1) {
-          dashWs.send(JSON.stringify({type:'close', id:s.id}));
+      if (!s.local) {
+        const t = tailMap[s.id];
+        if (t) {
+          const pre = document.createElement('pre');
+          pre.className = 'stail';
+          pre.textContent = t.split('\\n').slice(-12).join('\\n');
+          body.appendChild(pre);
         }
-      });
+      }
 
       card.appendChild(dot);
       card.appendChild(body);
-      card.appendChild(close);
-      card.addEventListener('click', () => openTerminal(s.id, s.name));
+
+      if (!s.local) {
+        const close = document.createElement('button');
+        close.className = 'sclose'; close.textContent = '\u00d7';
+        close.setAttribute('aria-label', 'Close session ' + s.name);
+        close.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (dashWs && dashWs.readyState === 1) {
+            dashWs.send(JSON.stringify({type:'close', id:s.id}));
+          }
+        });
+        card.appendChild(close);
+      } else if (s.kind === 'agent' && agentMap[s.shell]) {
+        const ctrl = document.createElement('button');
+        ctrl.className = 'sctrl'; ctrl.textContent = 'Control';
+        ctrl.addEventListener('click', (e) => {
+          e.stopPropagation();
+          controlAgent(s);
+        });
+        card.appendChild(ctrl);
+      }
+
+      card.addEventListener('click', () => {
+        if (s.local) { if (s.kind === 'agent' && agentMap[s.shell]) controlAgent(s); }
+        else openTerminal(s.id, s.name);
+      });
       list.appendChild(card);
     }
   }
-
-  function syncShellSelect() {
-    const sel = document.getElementById('newshell');
-    if (activeAgent !== 'all' && sel.querySelector('option[value="' + activeAgent + '"]')) {
-      sel.value = activeAgent;
-      showCwdField();
-      return;
-    }
-    if (activeShell !== 'all' && sel.querySelector('option[value="' + activeShell + '"]')) {
-      sel.value = activeShell;
-      showCwdField();
-    }
-  }
-
-  function showCwdField() {
-    const sel = document.getElementById('newshell');
-    const cwd = document.getElementById('newcwd');
-    const isAgent = !!agentMap[sel.value];
-    cwd.disabled = !isAgent;
-    cwd.placeholder = isAgent ? (agentDefaultCwd || '~') + ' (agent default)' : 'not used for shells';
-    if (isAgent && !cwd.value) cwd.value = agentDefaultCwd;
-    if (!isAgent) cwd.value = '';
-  }
-  document.getElementById('newshell').addEventListener('change', showCwdField);
 
   function connect() {
     code = codeInput.value.trim();
@@ -1116,12 +1202,128 @@ INDEX_HTML = """<!doctype html>
     }
   }
 
-  // ---- Bottom sheet (New session) ----
+  // ---- Live local processes + session output tails ----
+  function pollProcesses() {
+    fetch('/processes').then(r => r.json()).then(data => {
+      localProcs = data.processes || [];
+      if (dashState) renderSessions(dashState);
+    }).catch(() => {});
+  }
+  function pollTails() {
+    fetch('/tails').then(r => r.json()).then(data => {
+      tailMap = {};
+      (data.sessions || []).forEach(s => { if (s.tail) tailMap[s.id] = s.tail; });
+      if (dashState) renderSessions(dashState);
+    }).catch(() => {});
+  }
+  function pollTick() { pollProcesses(); pollTails(); }
+  setInterval(pollTick, 4000);
+  pollTick();
+
+  // External agent rows are read-only; "Control" spawns a parallel hub session
+  // of the same agent and attaches to it immediately.
+  function controlAgent(p) {
+    if (!agentMap[p.shell] || !dashWs || dashWs.readyState !== 1) return;
+    if (!confirm('Agent sessions run with your local machine credentials and API keys.\\n' +
+        'Start ' + agentMap[p.shell].name + ' in the browser?')) return;
+    pendingControl = p.shell;
+    dashWs.send(JSON.stringify({type:'create', shell: p.shell, cwd: ''}));
+  }
+
+  // ---- Bottom sheet (New session): tabbed agent/shell list + folder browser ----
+  function defaultCwdFor(id) {
+    if (id && agentMap[id]) return agentMap[id].cwd || agentDefaultCwd || '~';
+    return ''; // shells: empty => server cwd
+  }
+
+  function renderSheetList() {
+    const list = document.getElementById('itemlist');
+    list.innerHTML = '';
+    if (sheetTab === 'agents') {
+      const ordered = agentIds.slice().sort((a, b) =>
+        agentMap[a].launchable === agentMap[b].launchable ? 0 : agentMap[a].launchable ? -1 : 1);
+      for (const id of ordered) {
+        const a = agentMap[id];
+        const row = document.createElement('button');
+        row.className = 'irow' + (selItem.agents === id ? ' on' : '') + (a.launchable ? '' : ' dis');
+        const nm = document.createElement('span');
+        nm.textContent = a.name + (a.version ? ' \u00b7 v' + a.version : '');
+        row.appendChild(nm);
+        if (!a.launchable) {
+          const t = document.createElement('span');
+          t.className = 'dnl'; t.textContent = 'not launchable';
+          row.appendChild(t);
+        }
+        row.addEventListener('click', () => {
+          if (!a.launchable) return;
+          selItem.agents = id;
+          renderSheetList();
+          loadFolders(defaultCwdFor(id));
+        });
+        list.appendChild(row);
+      }
+      if (!ordered.length) {
+        const e = document.createElement('div');
+        e.className = 'inote'; e.textContent = 'No AI harnesses detected.';
+        list.appendChild(e);
+      }
+    } else {
+      for (const id of Object.keys(shellMap)) {
+        const row = document.createElement('button');
+        row.className = 'irow' + (selItem.shells === id ? ' on' : '');
+        const nm = document.createElement('span');
+        nm.textContent = shellMap[id] || id;
+        row.appendChild(nm);
+        row.addEventListener('click', () => {
+          selItem.shells = id;
+          renderSheetList();
+          loadFolders(defaultCwdFor(id));
+        });
+        list.appendChild(row);
+      }
+      if (!Object.keys(shellMap).length) {
+        const e = document.createElement('div');
+        e.className = 'inote'; e.textContent = 'No shells available.';
+        list.appendChild(e);
+      }
+    }
+  }
+
+  function loadFolders(path) {
+    fetch('/dir?path=' + encodeURIComponent(path)).then(r => r.json()).then(d => {
+      if (d.error) { showToast(d.error); return; }
+      curPath = d.path;
+      const inp = document.getElementById('newcwd');
+      inp.value = d.path;
+      const ul = document.getElementById('foldlist');
+      ul.innerHTML = '';
+      if (d.parent) {
+        const up = document.createElement('li');
+        up.className = 'frow up';
+        up.textContent = '\u2191 ..';
+        up.addEventListener('click', () => loadFolders(d.parent));
+        ul.appendChild(up);
+      }
+      for (const dir of (d.dirs || [])) {
+        const li = document.createElement('li');
+        li.className = 'frow';
+        li.textContent = dir.name + '/';
+        li.title = dir.path;
+        li.addEventListener('click', () => loadFolders(dir.path));
+        ul.appendChild(li);
+      }
+      if (!d.dirs.length && !d.parent) {
+        const e = document.createElement('li');
+        e.id = 'foldempty'; e.textContent = 'No subfolders here.';
+        ul.appendChild(e);
+      }
+    }).catch(() => showToast('Cannot read that directory.'));
+  }
+
   function openSheet() {
-    const wrap = document.getElementById('sheetwrap');
-    wrap.classList.add('on');
-    showCwdField();
-    document.getElementById('newshell').focus();
+    document.getElementById('sheetwrap').classList.add('on');
+    renderSheetList();
+    loadFolders(defaultCwdFor(selItem[sheetTab]));
   }
   function closeSheet() {
     document.getElementById('sheetwrap').classList.remove('on');
@@ -1129,6 +1331,21 @@ INDEX_HTML = """<!doctype html>
   document.getElementById('fab').addEventListener('click', openSheet);
   document.getElementById('scrim').addEventListener('click', closeSheet);
   document.getElementById('sheetclose').addEventListener('click', closeSheet);
+  document.getElementById('stabbar').addEventListener('click', (e) => {
+    const btn = e.target.closest('.stab');
+    if (!btn) return;
+    sheetTab = btn.dataset.tab;
+    document.getElementById('stabbar').querySelectorAll('.stab').forEach(b =>
+      b.classList.toggle('on', b === btn));
+    renderSheetList();
+    loadFolders(defaultCwdFor(selItem[sheetTab]));
+  });
+  document.getElementById('cwdgo').addEventListener('click', () => {
+    loadFolders(document.getElementById('newcwd').value.trim());
+  });
+  document.getElementById('newcwd').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') loadFolders(document.getElementById('newcwd').value.trim());
+  });
 
   // Keyboard: keep the sheet inside the visible viewport while typing.
   if (window.visualViewport) {
@@ -1151,10 +1368,9 @@ INDEX_HTML = """<!doctype html>
   document.getElementById('backbtn').addEventListener('click', backToDash);
   document.getElementById('addbtn').addEventListener('click', () => {
     if (!dashWs || dashWs.readyState !== 1) return;
-    const sel = document.getElementById('newshell');
-    const shell = sel.value ? sel.value : '';
-    const cwdIn = document.getElementById('newcwd');
-    const cwd = agentMap[shell] ? cwdIn.value.trim() : '';
+    const shell = selItem[sheetTab];
+    if (!shell) { showToast('Select an item first.'); return; }
+    const cwd = document.getElementById('newcwd').value.trim();
     if (agentMap[shell] && !confirm(
         'Agent sessions run with your local machine credentials and API keys.\\n' +
         'Start ' + agentMap[shell].name + (cwd ? ' in ' + cwd : '') + '?')) {
@@ -1207,6 +1423,51 @@ async def rescan_agents():
     return {"agents": agents.available_agents() if agents.ENABLED else []}
 
 
+@app.get("/processes")
+async def processes_endpoint():
+    with _state_lock:
+        live = {
+            s["proc"].pid
+            for s in _sessions.values()
+            if s["proc"] is not None and s["proc"].isalive()
+        }
+    return {"processes": processes.scan(live)}
+
+
+@app.get("/tails")
+async def tails_endpoint():
+    with _state_lock:
+        out = [{"id": sid, "tail": _clean_tail(s.get("tail"))} for sid, s in _sessions.items()]
+    return {"sessions": out}
+
+
+@app.get("/dir")
+async def dir_listing(path: str = ""):
+    """Folder browser for the create sheet: directories only, absolute paths."""
+    if not path:
+        base = os.path.expanduser("~")
+    else:
+        base = os.path.expanduser(path)
+    base = os.path.realpath(base)
+    if not os.path.isdir(base):
+        return JSONResponse({"error": "not a directory"}, status_code=404)
+    parent = os.path.dirname(base)
+    if parent == base:
+        parent = None
+    dirs = []
+    try:
+        for e in os.scandir(base):
+            try:
+                if e.is_dir():
+                    dirs.append({"name": e.name, "path": e.path})
+            except OSError:
+                continue
+    except OSError:
+        pass
+    dirs.sort(key=lambda d: d["name"].lower())
+    return {"path": base, "parent": parent, "dirs": dirs}
+
+
 def _claim_owner(client_ip: str) -> None:
     """Bind the hub to the first client that authenticates (idempotent)."""
     with _state_lock:
@@ -1235,9 +1496,26 @@ async def _send_claimed(websocket: WebSocket, client_ip: str) -> None:
         _active_ws.discard(websocket)
 
 
+TAIL_BYTES = 8192  # per-session output tail kept for dashboard preview
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*(?:\x07|\x1b\\)")
+
+
+def _clean_tail(raw) -> str:
+    """Decode a session tail, strip ANSI escapes, collapse newlines."""
+    if not raw:
+        return ""
+    if isinstance(raw, bytes):
+        raw = raw.decode("latin-1", errors="replace")
+    s = _ANSI_RE.sub("", raw)
+    s = s.replace("\r\n", "\n").replace("\r", "\n")
+    return s[-2000:]
+
+
 def _reader(sess, loop) -> None:
     """Push a session's ConPTY output to whichever websocket is attached.
-    Lives for the session's lifetime: keeps running across ws detach/attach."""
+    Lives for the session's lifetime: keeps running across ws detach/attach.
+    A bounded tail of the output is kept so the dashboard can preview it."""
     proc = sess["proc"]
     stop = sess["reader_stop"]
     while not stop.is_set() and proc.isalive():
@@ -1248,6 +1526,7 @@ def _reader(sess, loop) -> None:
         if not data:
             continue
         with _state_lock:
+            sess["tail"] = ((sess.get("tail") or "") + data)[-TAIL_BYTES:]
             ws = sess["ws"]
         if ws is None:
             continue  # detached: output is dropped
@@ -1275,18 +1554,23 @@ async def _handle_dashboard(websocket: WebSocket, client_ip: str) -> None:
             if t == "create":
                 shell = (obj.get("shell") or "").strip().lower()
                 cwd = (obj.get("cwd") or "").strip()
+                if cwd:
+                    cwd = os.path.expanduser(cwd)
                 avail = available_shells()
-                if shell not in avail:
-                    if not (agents.ENABLED and agents.is_agent(shell) and agents.can_launch(shell)):
-                        shell = _DEFAULT_INSTALLED
-                        cwd = ""
-                    elif cwd and not os.path.isdir(cwd):
+                if shell in avail:
+                    if cwd and not os.path.isdir(cwd):
                         await websocket.send_text(json.dumps(
                             {"type": "error", "message": "Working directory does not exist"}))
                         continue
-                    elif not cwd:
+                elif agents.ENABLED and agents.is_agent(shell) and agents.can_launch(shell):
+                    if cwd and not os.path.isdir(cwd):
+                        await websocket.send_text(json.dumps(
+                            {"type": "error", "message": "Working directory does not exist"}))
+                        continue
+                    if not cwd:
                         cwd = agents.spec_cwd(shell)
                 else:
+                    shell = _DEFAULT_INSTALLED
                     cwd = ""
                 with _state_lock:
                     sess = _make_session(shell, cwd)
@@ -1352,7 +1636,7 @@ async def _handle_attach(websocket: WebSocket, session_id: str, client_ip: str) 
                 argv = spec["argv"]()
                 env = dict(os.environ)
                 env.update(spec.get("env", {}))
-                proc_cwd = None
+                proc_cwd = cwd or None
             else:
                 bin_path = agents.find_bin(sid)
                 argv = agents.launch_argv(sid, bin_path)

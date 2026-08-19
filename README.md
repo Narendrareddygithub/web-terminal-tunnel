@@ -67,11 +67,20 @@ active sessions. Connect to one (or tap the **+** button and add another, with
 `-ShellChoice` letting you pick any installed shell: PowerShell, pwsh, cmd,
 Git Bash, WSL). Sessions keep running while you're away — close the browser tab
 and the shell survives until you close it from the dashboard. The UI is
-mobile-first: a horizontally scrollable filter rail (status / shell / agent
-chips), full-width tap-to-connect session cards, and a bottom-sheet form for
-new sessions — works from a 360px phone screen up to a desktop browser. On a
-phone, a small toolbar appears with Esc / Tab / Ctrl+C / Ctrl+D / Ctrl+Z /
-Ctrl+L / arrow keys, since mobile keyboards can't send those directly.
+mobile-first: **Agents | Shells** dashboard tabs (Agents selected by default)
+with a static All / Active / Idle filter rail, full-width tap-to-connect
+session cards that show each session's **working directory** and a **live tail
+of its output**, and a bottom-sheet new-session form with AI Agents / Shells
+tabs and a **folder browser** — pick the working directory by navigating
+folders (directories only) or typing a path, for both agents and shells. Works
+from a 360px phone screen up to a desktop browser. On a phone, a small toolbar
+appears with Esc / Tab / Ctrl+C / Ctrl+D / Ctrl+Z / Ctrl+L / arrow keys, since
+mobile keyboards can't send those directly. The dashboard also lists **live
+local processes** — shells and agent CLIs (Claude Code, OpenCode, Codex, ...)
+actually running on the machine right now — with `LOCAL` badges and a `Control`
+button that spawns a parallel, fully controllable hub session of that agent in
+the browser (an already-running process can't be adopted into ConPTY, so you
+get a fresh session of the same agent instead).
 
 Press **Ctrl+C** in the PowerShell window to shut everything down — the tunnel and the
 access code both die with it.
@@ -118,6 +127,19 @@ access code both die with it.
 - [x] Mobile-first responsive UI (done, shipped `wtt-web@1.3.0` — chip-rail
       filters, tap-to-connect session cards, FAB + bottom-sheet new-session
       form, 44px+ touch targets, safe-area insets, dark theme)
+
+- [x] Live local process visibility + parallel control (done — the dashboard
+      polls `/processes` (psutil) and lists running shell/agent processes with
+      `LOCAL` badges; agent rows get a `Control` button that spawns a parallel
+      hub session of the same agent and attaches to it in the browser)
+
+- [x] Dashboard tabs + tabbed create sheet with folder picker (done — Agents |
+      Shells dashboard tabs with All / Active / Idle chips, static (no
+      horizontal scroll); new-session bottom sheet with AI Agents / Shells tabs
+      and a folder browser (`/dir`, directories only, `..` up-navigation) that
+      launches agents and shells with a chosen working directory; session cards
+      show the working dir + a live output tail (`/tails`, ANSI-stripped,
+      polled every 4s))
 
 - [ ] Push notification to WhatsApp, Telegram or other messaging platforms.
 

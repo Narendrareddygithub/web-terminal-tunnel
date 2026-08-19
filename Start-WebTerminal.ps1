@@ -105,9 +105,12 @@ try {
 # 2. Install dependencies (once) — checked via a marker file so re-runs are fast
 # ---------------------------------------------------------------------------
 $marker = Join-Path $workDir "deps_ok.marker"
-if (-not (Test-Path $marker)) {
-    Write-Host "Installing Python dependencies (fastapi, uvicorn, pywinpty)..."
-    python -m pip install --quiet fastapi "uvicorn[standard]" pywinpty
+$psutilMissing = $false
+python -c "import psutil" 2>$null
+if ($LASTEXITCODE -ne 0) { $psutilMissing = $true }
+if ((-not (Test-Path $marker)) -or $psutilMissing) {
+    Write-Host "Installing Python dependencies (fastapi, uvicorn, pywinpty, psutil)..."
+    python -m pip install --quiet fastapi "uvicorn[standard]" pywinpty psutil
     if ($LASTEXITCODE -ne 0) {
         Write-Host "pip install failed. See errors above." -ForegroundColor Red
         exit 1
