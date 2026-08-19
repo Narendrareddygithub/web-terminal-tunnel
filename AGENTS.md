@@ -27,7 +27,7 @@ npm i -g wtt-web
 wtt-web -Shell cmd -ShellChoice -Sessions 3
 ```
 
-Publishing to npm: `npm login` then `npm publish` (2FA/OTP or a granular bypass token required). Never commit `.npmrc` — gitignored. After a wrapper change: `npm pack` → `npm i -g ./wtt-web-1.3.0.tgz` → run + Ctrl+C teardown check before publishing.
+Publishing to npm: `npm login` then `npm publish` (2FA/OTP or a granular bypass token required). Never commit `.npmrc` — gitignored. Repo `.env` (gitignored) holds the bypass token as `npm_auth_token` — publish without logging in via `npm publish "--//registry.npmjs.org/:_authToken=$tok"` (read token from `.env`; token never written to disk). After a wrapper change: `npm pack` → `npm i -g ./wtt-web-<ver>.tgz` → run + Ctrl+C teardown check before publishing.
 
 **Stale-install gotcha:** `wtt-web` runs the copy in `%APPDATA%\npm\node_modules\wtt-web`, NOT the repo — repo edits never reach a running hub until a reinstall + launcher restart. After any `terminal_server.py`/`agents.py`/`processes.py`/`.ps1` change: `npm pack` → `npm i -g ./wtt-web-<ver>.tgz` (same version is fine, forces the file copy) → Ctrl+C the old launcher → run `wtt-web` again. Verify the installed copy actually has the change (e.g. `Select-String /processes node_modules\wtt-web\terminal_server.py`).
 
